@@ -1,0 +1,28 @@
+/debug
+/target
+/build
+/result
+/*.tar
+/*/*.tar
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE files
+.vscode/
+.idea/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Rust
+**/*.rs.bk
+
+# Clippy compile errors keep generating this
+/rustc-ice-*
+
+# Continuum local files
+continuum-manifests/
