@@ -1,8 +1,7 @@
 use crate::models::email_verification::NewEmailVerification;
 use crate::models::oauth::NewUserOAuthConnection;
 use crate::web::encryption_middleware::{decrypt_request, encrypt_response, EncryptedResponse};
-use crate::web::login_routes::{handle_new_user_registration, VALID_INVITE_CODES};
-use crate::AppMode;
+use crate::web::login_routes::handle_new_user_registration;
 use crate::{encrypt, DBError};
 use crate::{
     jwt::{NewToken, TokenType},
@@ -69,15 +68,12 @@ struct OAuthOAuthCallbackResponse {
 }
 
 #[derive(Deserialize, Clone)]
-struct OAuthAuthRequest {
-    invite_code: Option<String>,
-}
+struct OAuthAuthRequest {}
 
 #[derive(Deserialize, Clone)]
 struct OAuthCallbackRequest {
     code: String,
     state: String,
-    invite_code: String,
 }
 
 #[derive(Serialize)]
@@ -113,20 +109,11 @@ struct GoogleUser {
 
 async fn initiate_oauth(
     State(app_state): State<Arc<AppState>>,
-    Extension(auth_request): Extension<OAuthAuthRequest>,
+    Extension(_auth_request): Extension<OAuthAuthRequest>,
     Extension(session_id): Extension<Uuid>,
     provider_name: &str,
 ) -> Result<Json<EncryptedResponse<OAuthOAuthCallbackResponse>>, ApiError> {
     debug!("Entering init {} auth function", provider_name);
-
-    // Check the invite code if it's provided (for sign-ups)
-    if let Some(invite_code) = &auth_request.invite_code {
-        let lowercase_invite_code = invite_code.to_lowercase();
-        if !VALID_INVITE_CODES.contains(&lowercase_invite_code.as_str()) {
-            error!("Invalid invite code: {}", lowercase_invite_code);
-            return Err(ApiError::InvalidInviteCode);
-        }
-    }
 
     let oauth_client = app_state
         .oauth_manager
@@ -153,7 +140,6 @@ async fn oauth_callback(
     debug!("Entering {} callback function", provider_name);
     trace!("Received code: {}", callback_request.code);
     trace!("Received state: {}", callback_request.state);
-    trace!("Received invite code: {}", callback_request.invite_code);
 
     let oauth_client = app_state
         .oauth_manager
@@ -205,7 +191,6 @@ async fn oauth_callback(
                 github_user.id.to_string(),
                 "github",
                 token.secret().to_string(),
-                &callback_request.invite_code,
                 github_user.name.clone().or(Some(github_user.login.clone())),
             )
             .await?
@@ -229,7 +214,6 @@ async fn oauth_callback(
                 google_user.sub.clone(),
                 "google",
                 token.secret().to_string(),
-                &callback_request.invite_code,
                 google_user.name.clone(),
             )
             .await?
@@ -252,7 +236,8 @@ async fn oauth_callback(
 
     let auth_response = OAuthCallbackResponse {
         id: user.get_id(),
-        email: user.get_email()
+        email: user
+            .get_email()
             .expect("OAuth user must have email")
             .to_string(),
         access_token: access_token.token,
@@ -422,7 +407,6 @@ async fn find_or_create_user_from_oauth(
     provider_user_id: String,
     provider_name: &str,
     access_token: String,
-    invite_code: &str,
     user_name: Option<String>,
 ) -> Result<User, ApiError> {
     let provider = app_state
@@ -461,26 +445,9 @@ async fn find_or_create_user_from_oauth(
             }
         }
         Err(DBError::UserNotFound) => {
-            // If invite code is empty and not in preview mode, return UserNotFound error
-            if invite_code.is_empty() && app_state.app_mode != AppMode::Preview {
-                return Err(ApiError::UserNotFound);
-            }
-
-            // Check the invite code for new sign-ups, but skip for preview mode
-            if app_state.app_mode != AppMode::Preview {
-                let lowercase_invite_code = invite_code.to_lowercase();
-                if !VALID_INVITE_CODES.contains(&lowercase_invite_code.as_str()) {
-                    error!(
-                        "Invalid invite code for new user: {}",
-                        lowercase_invite_code
-                    );
-                    return Err(ApiError::InvalidInviteCode);
-                }
-            }
-
             // Create new user
-            let new_user = NewUser::new(Some(email.clone()), None)
-                .with_name(user_name.unwrap_or_default());
+            let new_user =
+                NewUser::new(Some(email.clone()), None).with_name(user_name.unwrap_or_default());
 
             let user = app_state.db.create_user(new_user).map_err(|e| {
                 error!("Failed to create new user: {:?}", e);
