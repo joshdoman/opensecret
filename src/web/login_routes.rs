@@ -1,4 +1,3 @@
-use crate::AppMode;
 use crate::User;
 use crate::{
     db::DBError,
@@ -24,8 +23,6 @@ use std::sync::Arc;
 use tokio::spawn;
 use tracing::{debug, error, info};
 use uuid::Uuid;
-
-pub const VALID_INVITE_CODES: [&str; 3] = ["bearclaw24", "friends24", "hivemind24"];
 
 #[derive(Deserialize, Clone)]
 pub struct PasswordResetRequestPayload {
@@ -228,15 +225,6 @@ pub async fn register(
 ) -> Result<Json<EncryptedResponse<AuthResponse>>, ApiError> {
     debug!("Entering register function");
     tracing::trace!("call register");
-
-    // Skip invite code check for preview mode
-    if data.app_mode != AppMode::Preview {
-        // Check the invite code (case-insensitive)
-        let lowercase_invite_code = creds.invite_code.to_lowercase();
-        if !VALID_INVITE_CODES.contains(&lowercase_invite_code.as_str()) {
-            return Err(ApiError::InvalidInviteCode);
-        }
-    }
 
     let user = match data.register_user(creds.clone()).await {
         Ok(user) => user,

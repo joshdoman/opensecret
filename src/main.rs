@@ -278,7 +278,6 @@ pub struct RegisterCredentials {
     pub name: Option<String>,
     pub email: Option<String>,
     pub password: String,
-    pub invite_code: String,
 }
 
 #[derive(Debug, Clone)]

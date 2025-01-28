@@ -29,7 +29,7 @@ const WELCOME_EMAIL_HTML: &str = r#"
 <body>
     <div class="container">
         <h1>Welcome to <a href="https://trymaple.ai">Maple AI</a>!</h1>
-        <p>We're thrilled to have you join us during our private beta.</p>
+        <p>We're thrilled to have you join us.</p>
 
         <p><em>Just as Maple trees thrive through their discreet underground communication network of fungal hyphae, Maple AI empowers you to flourish in the digital world while maintaining your privacy.</em></p>
 
@@ -55,7 +55,7 @@ const WELCOME_EMAIL_HTML: &str = r#"
 
         <p>We hope you enjoy using Maple AI, knowing that your sensitive discussions and data are protected at every step. Your privacy is not just a feature – it's our mission.</p>
 
-        <p>As we're in private beta, your feedback is incredibly valuable. If you encounter any issues or have suggestions, please reach out to us at <a href="mailto:team@opensecret.cloud">team@opensecret.cloud</a>.</p>
+        <p>Your feedback is incredibly valuable. If you encounter any issues or have suggestions, please reach out to us at <a href="mailto:support@opensecret.cloud">support@opensecret.cloud</a>.</p>
 
         <p>Thank you for being an early adopter and helping us shape the future of secure, AI-powered productivity!</p>
 
@@ -269,14 +269,14 @@ pub async fn send_password_reset_confirmation_email(
             <div class="container">
                 <h1>Password Reset Confirmation</h1>
                 <p>Your Maple AI account password has been successfully reset.</p>
-                <p>If you did not initiate this password reset, please contact us immediately at <a href="mailto:support@trymaple.ai">support@trymaple.ai</a>.</p>
+                <p>If you did not initiate this password reset, please contact us immediately at <a href="mailto:support@opensecret.cloud">support@opensecret.cloud</a>.</p>
                 <p>For security reasons, we recommend that you:</p>
                 <ul>
                     <li>Change your password again if you suspect any unauthorized access.</li>
                     <li>Review your account activity for any suspicious actions.</li>
                 </ul>
                 <p>If you have any questions or concerns, please don't hesitate to reach out to our support team.</p>
-                <p>Best regards,<br>The Maple AI Team</p>
+                <p>Best regards,<br>The OpenSecret Team</p>
             </div>
         </body>
         </html>
