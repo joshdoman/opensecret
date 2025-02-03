@@ -1,4 +1,3 @@
-use crate::billing::BillingClient;
 use crate::email::send_password_reset_confirmation_email;
 use crate::email::send_password_reset_email;
 use crate::encrypt::encrypt_key_deterministic;
@@ -6,18 +5,21 @@ use crate::encrypt::generate_random;
 use crate::encrypt::{
     decrypt_with_key, decrypt_with_kms, encrypt_with_key, CustomRng, GenKeyResult,
 };
+use crate::login_routes::RegisterCredentials;
 use crate::models::password_reset::NewPasswordResetRequest;
+use crate::models::platform_users::PlatformUser;
 use crate::sqs::SqsEventPublisher;
-use crate::{attestation_routes::SessionState, web::oauth_routes};
+use crate::web::{health_routes, login_routes, oauth_routes, openai_routes, protected_routes};
+use crate::{attestation_routes::SessionState, web::platform_org_routes};
 use crate::{
     aws_credentials::AwsCredentialError,
     models::enclave_secrets::NewEnclaveSecret,
     private_key::{decrypt_user_seed_to_key, generate_twelve_word_seed},
 };
+use crate::{billing::BillingClient, web::platform_org_routes::PROJECT_RESEND_API_KEY};
 use crate::{
     db::{setup_db, DBConnection, DBError},
     models::users::{NewUser, User},
-    web::openai_routes,
 };
 use crate::{encrypt::create_new_encryption_key, jwt::validate_jwt};
 use aws_credentials::{AwsCredentialManager, AwsCredentials};
@@ -54,7 +56,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 use url::Url;
 use uuid::Uuid;
 use vsock::{VsockAddr, VsockStream};
-use web::{attestation_routes, health_routes, login_routes, protected_routes};
+use web::attestation_routes;
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
 mod aws_credentials;
@@ -65,6 +67,7 @@ mod encrypt;
 mod jwt;
 mod kv;
 mod message_signing;
+mod migrations;
 mod models;
 mod oauth;
 mod private_key;
@@ -76,10 +79,14 @@ use oauth::{GithubProvider, GoogleProvider, OAuthManager};
 const ENCLAVE_KEY_NAME: &str = "enclave_key";
 const OPENAI_API_KEY_NAME: &str = "openai_api_key";
 const JWT_SECRET_KEY_NAME: &str = "jwt_secret";
+
+// TODO Use OpenSecret-specific values when migration is finished
 const GITHUB_CLIENT_ID_NAME: &str = "github_client_id";
 const GITHUB_CLIENT_SECRET_NAME: &str = "github_client_secret";
 const GOOGLE_CLIENT_ID_NAME: &str = "google_client_id";
 const GOOGLE_CLIENT_SECRET_NAME: &str = "google_client_secret";
+const RESEND_API_KEY_NAME: &str = "resend_api_key";
+
 const BILLING_API_KEY_NAME: &str = "billing_api_key";
 const BILLING_SERVER_URL_NAME: &str = "billing_server_url";
 
@@ -216,6 +223,9 @@ pub enum ApiError {
 
     #[error("Usage limit reached")]
     UsageLimitReached,
+
+    #[error("Resource not found")]
+    NotFound,
 }
 
 impl IntoResponse for ApiError {
@@ -235,6 +245,7 @@ impl IntoResponse for ApiError {
             ApiError::UserNotFound => StatusCode::NOT_FOUND,
             ApiError::EmailAlreadyExists => StatusCode::CONFLICT,
             ApiError::UsageLimitReached => StatusCode::FORBIDDEN,
+            ApiError::NotFound => StatusCode::NOT_FOUND,
         };
         (
             status,
@@ -244,6 +255,19 @@ impl IntoResponse for ApiError {
             }),
         )
             .into_response()
+    }
+}
+
+impl From<DBError> for ApiError {
+    fn from(err: DBError) -> Self {
+        error!("Database error: {:?}", err);
+        match err {
+            DBError::PlatformUserNotFound => ApiError::UserNotFound,
+            DBError::PlatformUserError(_) => ApiError::InternalServerError,
+            DBError::OrgMembershipNotFound => ApiError::NotFound,
+            DBError::OrgMembershipError(_) => ApiError::InternalServerError,
+            _ => ApiError::InternalServerError,
+        }
     }
 }
 
@@ -265,21 +289,6 @@ pub struct TokenClaims {
     pub aud: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct Credentials {
-    pub email: Option<String>,
-    pub id: Option<Uuid>,
-    pub password: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RegisterCredentials {
-    pub name: Option<String>,
-    pub email: Option<String>,
-    pub password: String,
-}
-
 #[derive(Debug, Clone)]
 pub struct Config {
     jwt_keys: jwt::JwtKeys,
@@ -299,7 +308,7 @@ pub enum AppMode {
 impl AppMode {
     fn frontend_url(&self) -> &str {
         match self {
-            AppMode::Local => "http://localhost:5173",
+            AppMode::Local => "http://127.0.0.1:5173",
             AppMode::Dev => "https://dev.secretgpt.ai",
             AppMode::Preview => "https://preview.opensecret.cloud",
             AppMode::Prod => "https://trymaple.ai",
@@ -499,25 +508,19 @@ impl AppStateBuilder {
 
         let mut oauth_manager = OAuthManager::new();
 
-        if let (Some(client_id), Some(client_secret)) = (
-            self.github_client_id.clone(),
-            self.github_client_secret.clone(),
-        ) {
-            let callback_url = format!("{}/auth/github/callback", app_mode.frontend_url());
-            let github_provider =
-                GithubProvider::new(db.clone(), client_id, client_secret, callback_url).await?;
-            oauth_manager.add_provider("github".to_string(), Box::new(github_provider));
-        }
+        // Initialize GitHub provider
+        let github_provider = GithubProvider::new(db.clone()).await.map_err(|e| {
+            error!("Failed to initialize GitHub OAuth provider: {:?}", e);
+            Error::BuilderError("Failed to initialize GitHub OAuth provider".to_string())
+        })?;
+        oauth_manager.add_provider("github".to_string(), Box::new(github_provider));
 
-        if let (Some(client_id), Some(client_secret)) = (
-            self.google_client_id.clone(),
-            self.google_client_secret.clone(),
-        ) {
-            let callback_url = format!("{}/auth/google/callback", app_mode.frontend_url());
-            let google_provider =
-                GoogleProvider::new(db.clone(), client_id, client_secret, callback_url).await?;
-            oauth_manager.add_provider("google".to_string(), Box::new(google_provider));
-        }
+        // Initialize Google provider
+        let google_provider = GoogleProvider::new(db.clone()).await.map_err(|e| {
+            error!("Failed to initialize Google OAuth provider: {:?}", e);
+            Error::BuilderError("Failed to initialize Google OAuth provider".to_string())
+        })?;
+        oauth_manager.add_provider("google".to_string(), Box::new(google_provider));
 
         let oauth_manager = Arc::new(oauth_manager);
 
@@ -568,11 +571,23 @@ impl AppStateBuilder {
 
 impl AppState {
     async fn register_user(&self, creds: RegisterCredentials) -> Result<User, Error> {
+        // Get project by client_id
+        let project = self
+            .db
+            .get_org_project_by_client_id(creds.client_id)
+            .map_err(|e| {
+                error!(
+                    "Database error during client_id ({:?}) lookup: {:?}",
+                    creds.client_id, e
+                );
+                DBError::OrgProjectNotFound
+            })?;
+
         // First check if user exists - only if email is provided
         if let Some(email) = &creds.email {
-            match self.db.get_user_by_email(email.clone()) {
+            match self.db.get_user_by_email(email.clone(), project.id) {
                 Ok(_) => {
-                    // User already exists
+                    // User already exists in this project
                     return Err(Error::UserAlreadyExists);
                 }
                 Err(DBError::UserNotFound) => {
@@ -597,7 +612,8 @@ impl AppState {
 
         tracing::debug!("registering new user: {:?}", creds.email);
 
-        let new_user = NewUser::new(creds.email, Some(encrypted_data)).with_name_option(creds.name);
+        let new_user = NewUser::new(creds.email, Some(encrypted_data), project.id)
+            .with_name_option(creds.name);
 
         let user = self.db.create_user(new_user)?;
 
@@ -606,45 +622,57 @@ impl AppState {
         Ok(user)
     }
 
-    async fn authenticate_user(&self, creds: Credentials) -> Result<Option<User>, Error> {
+    async fn authenticate_user(
+        &self,
+        user_email: Option<String>,
+        user_id: Option<Uuid>,
+        user_password: String,
+        user_project_id: i32,
+    ) -> Result<Option<User>, Error> {
         // Ensure at least one identifier is provided
-        if creds.email.is_none() && creds.id.is_none() {
+        if user_email.is_none() && user_id.is_none() {
             return Err(Error::AuthenticationError);
         }
 
         // Try email first if provided, fall back to UUID
-        let user = if let Some(email) = creds.email {
-            self.db.get_user_by_email(email)?
+        let user = if let Some(email) = user_email {
+            self.db.get_user_by_email(email, user_project_id)?
         } else {
             // We can safely unwrap id here because we checked above that at least one exists
-            self.db.get_user_by_uuid(creds.id.unwrap())?
+            let user = self.db.get_user_by_uuid(user_id.unwrap())?;
+            // Verify user belongs to the specified project
+            if user.project_id != user_project_id {
+                return Err(Error::AuthenticationError);
+            }
+            user
         };
 
-        if let Some(ref password_enc) = user.password_enc {
-            // Decrypt the stored password with the enclave key
-            let secret_key = SecretKey::from_slice(&self.enclave_key.clone())
+        // Check if the user is an OAuth-only user
+        if user.password_enc.is_none() {
+            error!("OAuth-only user attempted password login");
+            return Ok(None);
+        }
+
+        // Verify the current password
+        let secret_key = SecretKey::from_slice(&self.enclave_key.clone())
+            .map_err(|e| Error::EncryptionError(e.to_string()))?;
+
+        let decrypted_password_bytes =
+            decrypt_with_key(&secret_key, user.password_enc.as_ref().unwrap())
                 .map_err(|e| Error::EncryptionError(e.to_string()))?;
 
-            let decrypted_password_bytes = decrypt_with_key(&secret_key, password_enc)
-                .map_err(|e| Error::EncryptionError(e.to_string()))?;
+        let decrypted_password_hash = String::from_utf8(decrypted_password_bytes)
+            .map_err(|e| Error::EncryptionError(format!("Failed to decode UTF-8: {}", e)))?;
 
-            let decrypted_password_hash = String::from_utf8(decrypted_password_bytes)
-                .map_err(|e| Error::EncryptionError(format!("Failed to decode UTF-8: {}", e)))?;
+        // Verifying the password is blocking and potentially slow, so we'll do so via
+        // `spawn_blocking`.
+        let res =
+            task::spawn_blocking(move || verify_password(user_password, &decrypted_password_hash))
+                .await?;
 
-            // Verifying the password is blocking and potentially slow, so we'll do so via
-            // `spawn_blocking`.
-            let res = task::spawn_blocking(move || {
-                verify_password(creds.password, &decrypted_password_hash)
-            })
-            .await?;
-
-            match res {
-                Ok(_) => Ok(Some(user)),
-                Err(_) => Ok(None),
-            }
-        } else {
-            // If the user doesn't have a password (OAuth-only user), authentication fails
-            Ok(None)
+        match res {
+            Ok(_) => Ok(Some(user)),
+            Err(_) => Ok(None),
         }
     }
 
@@ -870,15 +898,16 @@ impl AppState {
         Ok(encrypted_data)
     }
 
-    pub async fn create_password_reset_request(
+    async fn create_password_reset_request(
         &self,
         email: String,
         hashed_secret: String,
+        project_id: i32,
     ) -> Result<String, Error> {
         let alphanumeric_code = self.generate_alphanumeric_code();
 
         // Check if the user exists
-        match self.db.get_user_by_email(email.clone()) {
+        match self.db.get_user_by_email(email.clone(), project_id) {
             Ok(user) => {
                 // Only proceed with email if user has one
                 if user.get_email().is_some() {
@@ -898,13 +927,12 @@ impl AppState {
                     self.db.create_password_reset_request(new_request)?;
 
                     // Send the actual email in the background
-                    let app_mode = self.app_mode.clone();
-                    let resend_api_key = self.resend_api_key.clone();
+                    let app_state = self.clone();
                     let user_email = email.clone();
                     let code = alphanumeric_code.clone();
                     tokio::spawn(async move {
                         if let Err(e) =
-                            send_password_reset_email(app_mode, resend_api_key, user_email, code)
+                            send_password_reset_email(&app_state, project_id, user_email, code)
                                 .await
                         {
                             error!("Failed to send password reset email: {:?}", e);
@@ -927,14 +955,15 @@ impl AppState {
         Ok(alphanumeric_code)
     }
 
-    pub async fn confirm_password_reset(
+    async fn confirm_password_reset(
         &self,
         email: String,
         alphanumeric_code: String,
         plaintext_secret: String,
         new_password: String,
+        project_id: i32,
     ) -> Result<(), Error> {
-        let user = self.db.get_user_by_email(email.clone())?;
+        let user = self.db.get_user_by_email(email.clone(), project_id)?;
 
         // Verify user has an email
         if user.get_email().is_none() {
@@ -970,13 +999,12 @@ impl AppState {
                 self.db.mark_password_reset_as_complete(&reset_request)?;
 
                 // Send confirmation email in the background
-                let app_mode = self.app_mode.clone();
-                let resend_api_key = self.resend_api_key.clone();
+                let app_state = self.clone();
                 let user_email = user.email.clone();
                 tokio::spawn(async move {
                     if let Err(e) = send_password_reset_confirmation_email(
-                        app_mode,
-                        resend_api_key,
+                        &app_state,
+                        project_id,
                         user_email.expect("We checked email had to exist above"),
                     )
                     .await
@@ -1038,6 +1066,73 @@ impl AppState {
         Ok(base_url
             .join(&format!("/auth/{}/callback", provider))?
             .to_string())
+    }
+
+    async fn authenticate_platform_user(
+        &self,
+        email: &str,
+        password: String,
+    ) -> Result<Option<PlatformUser>, Error> {
+        // Get the platform user
+        let platform_user = match self.db.get_platform_user_by_email(email)? {
+            Some(user) => user,
+            None => return Ok(None),
+        };
+
+        // Check if this is an OAuth-only user (no password)
+        if platform_user.password_enc.is_none() {
+            error!("OAuth-only platform user attempted password login");
+            return Ok(None);
+        }
+
+        // Hash the provided password
+        let password_hash = password_auth::generate_hash(password);
+
+        // Encrypt the hash with enclave key for comparison
+        let secret_key = SecretKey::from_slice(&self.enclave_key)
+            .map_err(|e| Error::EncryptionError(e.to_string()))?;
+        let encrypted_password = encrypt_with_key(&secret_key, password_hash.as_bytes()).await;
+
+        // Compare the encrypted passwords
+        if platform_user.password_enc.as_ref() == Some(&encrypted_password) {
+            Ok(Some(platform_user))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn get_project_secret(
+        &self,
+        project_id: i32,
+        key_name: &str,
+    ) -> Result<Option<String>, Error> {
+        // Get the encrypted secret
+        let secret = match self
+            .db
+            .get_org_project_secret_by_key_name_and_project(key_name, project_id)?
+        {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        // Decrypt the secret using the enclave key
+        let secret_key = SecretKey::from_slice(&self.enclave_key)
+            .map_err(|e| Error::EncryptionError(e.to_string()))?;
+
+        let decrypted_bytes = decrypt_with_key(&secret_key, &secret.secret_enc)
+            .map_err(|e| Error::EncryptionError(e.to_string()))?;
+
+        // Always return base64 encoded bytes
+        Ok(Some(general_purpose::STANDARD.encode(&decrypted_bytes)))
+    }
+
+    pub async fn get_project_resend_api_key(
+        &self,
+        project_id: i32,
+    ) -> Result<Option<String>, Error> {
+        // Get the project's Resend API key
+        self.get_project_secret(project_id, PROJECT_RESEND_API_KEY)
+            .await
     }
 }
 
@@ -1243,7 +1338,7 @@ async fn retrieve_resend_api_key(
         .expect("non-local mode should have creds");
 
     // check if the key already exists in the db
-    let existing_key = db.get_enclave_secret_by_key("resend_api_key")?;
+    let existing_key = db.get_enclave_secret_by_key(RESEND_API_KEY_NAME)?;
 
     if let Some(ref encrypted_key) = existing_key {
         // Convert the stored bytes back to base64
@@ -1829,10 +1924,10 @@ async fn main() -> Result<(), Error> {
         .openai_api_base(openai_api_base)
         .jwt_secret(jwt_secret)
         .resend_api_key(resend_api_key)
-        .github_client_secret(github_client_secret)
-        .github_client_id(github_client_id)
-        .google_client_secret(google_client_secret)
-        .google_client_id(google_client_id)
+        .github_client_secret(github_client_secret.clone())
+        .github_client_id(github_client_id.clone())
+        .google_client_secret(google_client_secret.clone())
+        .google_client_id(google_client_id.clone())
         .sqs_queue_maple_events_url(sqs_queue_maple_events_url)
         .billing_api_key(billing_api_key)
         .billing_server_url(billing_server_url)
@@ -1841,6 +1936,16 @@ async fn main() -> Result<(), Error> {
     tracing::info!("App state created, app_mode: {:?}", app_mode);
 
     let app_state = Arc::new(app_state);
+
+    // Run migrations before starting the server
+    migrations::run_migrations(
+        &app_state,
+        github_client_secret.clone(),
+        google_client_secret.clone(),
+        github_client_id.clone(),
+        google_client_id.clone(),
+    )
+    .await?;
 
     let cors = CorsLayer::new()
         // allow `GET` and `POST` when accessing the resource
@@ -1860,6 +1965,12 @@ async fn main() -> Result<(), Error> {
         )
         .merge(attestation_routes::router(app_state.clone()))
         .merge(oauth_routes(app_state.clone()))
+        // Temporarily disabled platform routes
+        // .merge(platform_login_routes(app_state.clone()))
+        // .merge(
+        //     platform_org_routes(app_state.clone())
+        //         .route_layer(from_fn_with_state(app_state.clone(), validate_platform_jwt)),
+        // )
         .layer(cors);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")

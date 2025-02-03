@@ -3,8 +3,6 @@ use crate::jwt::{NewToken, TokenType};
 use crate::message_signing::SigningAlgorithm;
 use crate::private_key::decrypt_user_seed_to_mnemonic;
 use crate::web::encryption_middleware::{decrypt_request, encrypt_response, EncryptedResponse};
-use crate::web::login_routes::handle_new_user_registration;
-use crate::Credentials;
 use crate::Error;
 use crate::KVPair;
 use crate::{
@@ -18,7 +16,7 @@ use axum::{
     Router,
 };
 use axum::{Extension, Json};
-use base64::{engine::general_purpose, Engine};
+use base64::{engine::general_purpose, Engine as _};
 use bitcoin::bip32::DerivationPath;
 use chrono::{DateTime, Utc};
 use secp256k1::Secp256k1;
@@ -27,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio::spawn;
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
@@ -440,8 +439,8 @@ pub async fn request_new_verification_code(
 
     // Send the new verification email
     if let Err(e) = send_verification_email(
-        data.app_mode.clone(),
-        data.resend_api_key.clone(),
+        &data,
+        user.project_id,
         email,
         verification.verification_code,
     )
@@ -473,14 +472,15 @@ pub async fn change_password(
     // Get email if it exists
     let email = user.get_email().map(|e| e.to_string());
 
-    // Verify the current password
-    let credentials = Credentials {
-        email,
-        id: Some(user.uuid),
-        password: change_request.current_password,
-    };
-
-    match data.authenticate_user(credentials).await {
+    match data
+        .authenticate_user(
+            email,
+            Some(user.uuid),
+            change_request.current_password,
+            user.project_id,
+        )
+        .await
+    {
         Ok(Some(authenticated_user)) if authenticated_user.uuid == user.uuid => {
             // Current password is correct, proceed with password change
             match data
@@ -684,7 +684,7 @@ pub async fn convert_guest_to_email(
     // Check if email is already taken
     if data
         .db
-        .get_user_by_email(convert_request.email.clone())
+        .get_user_by_email(convert_request.email.clone(), user.project_id)
         .is_ok()
     {
         error!("Email address already in use");
@@ -709,10 +709,29 @@ pub async fn convert_guest_to_email(
         return Err(ApiError::InternalServerError);
     }
 
-    // Handle email verification and welcome emails
-    if let Err(e) = handle_new_user_registration(&data, &updated_user, true).await {
-        error!("Failed to handle registration tasks: {:?}", e);
-        return Err(e);
+    // Create email verification entry
+    let new_verification = NewEmailVerification::new(updated_user.uuid, 24, false);
+    let verification = match data.db.create_email_verification(new_verification) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("Error creating email verification: {:?}", e);
+            return Err(ApiError::InternalServerError);
+        }
+    };
+
+    // Send verification email
+    if let Some(email) = updated_user.get_email() {
+        let email = email.to_string();
+        let verification_code = verification.verification_code;
+        let data = data.clone();
+        let project_id = updated_user.project_id;
+        spawn(async move {
+            if let Err(e) =
+                send_verification_email(&data, project_id, email, verification_code).await
+            {
+                tracing::error!("Could not send verification email: {e}");
+            }
+        });
     }
 
     let response = json!({

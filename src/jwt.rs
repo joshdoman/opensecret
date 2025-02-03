@@ -18,9 +18,12 @@ use sha2::Sha256;
 use uuid::Uuid;
 
 use crate::AppMode;
-use crate::{ApiError, AppState, User};
+use crate::{ApiError, AppState};
 use url::Url;
 
+use crate::models::{platform_users::PlatformUser, users::User};
+
+#[derive(Debug, Clone)]
 pub enum TokenType {
     Access,
     Refresh,
@@ -153,6 +156,59 @@ impl NewToken {
             token: token_string,
         })
     }
+
+    pub fn new_for_platform_user(
+        user: &PlatformUser,
+        token_type: TokenType,
+        app_state: &AppState,
+    ) -> Result<Self, ApiError> {
+        let (aud, azp, duration) = match token_type {
+            TokenType::Access => (
+                "platform_access".to_string(),
+                None,
+                Duration::minutes(app_state.config.access_token_maxage),
+            ),
+            TokenType::Refresh => (
+                "platform_refresh".to_string(),
+                None,
+                Duration::days(app_state.config.refresh_token_maxage),
+            ),
+            TokenType::ThirdParty { .. } => {
+                // Platform users cannot create third-party tokens
+                return Err(ApiError::BadRequest);
+            }
+        };
+
+        let custom_claims = CustomClaims {
+            sub: user.uuid.to_string(),
+            aud,
+            azp,
+        };
+
+        tracing::debug!(
+            "Creating new platform token with claims: {:?}",
+            custom_claims
+        );
+
+        let time_options = TimeOptions::default();
+        let claims = Claims::new(custom_claims).set_duration_and_issuance(&time_options, duration);
+
+        let header = Header::empty().with_token_type("JWT");
+        let es256k = Es256k::<Sha256>::new(app_state.config.jwt_keys.secp.clone());
+
+        let token_string = es256k
+            .token(&header, &claims, &app_state.config.jwt_keys.signing_key)
+            .map_err(|e| {
+                tracing::error!("Error creating token: {:?}", e);
+                ApiError::InternalServerError
+            })?;
+
+        tracing::debug!("Successfully created platform token");
+
+        Ok(Self {
+            token: token_string,
+        })
+    }
 }
 
 pub async fn generate_jwt_secret(
@@ -220,6 +276,51 @@ pub async fn validate_jwt(
 
     req.extensions_mut().insert(user);
     tracing::debug!("Exiting validate_jwt");
+    next.run(req).await
+}
+
+#[allow(dead_code)]
+pub async fn validate_platform_jwt(
+    State(data): State<Arc<AppState>>,
+    mut req: Request<Body>,
+    next: Next,
+) -> impl IntoResponse {
+    tracing::debug!("Entering validate_platform_jwt");
+    let token = match req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|auth_header| auth_header.to_str().ok())
+        .and_then(|auth_value| auth_value.strip_prefix("Bearer ").map(ToString::to_string))
+    {
+        Some(token) => token,
+        None => return ApiError::InvalidJwt.into_response(),
+    };
+
+    tracing::trace!("Validating platform JWT");
+
+    let claims = match validate_token(&token, &data, "platform_access") {
+        Ok(claims) => claims,
+        Err(_) => return ApiError::InvalidJwt.into_response(),
+    };
+
+    let platform_user_id: Uuid = match Uuid::parse_str(&claims.sub) {
+        Ok(uuid) => uuid,
+        Err(e) => {
+            tracing::error!("Error parsing platform user uuid: {:?}", e);
+            return ApiError::InvalidJwt.into_response();
+        }
+    };
+
+    let platform_user = match data.db.get_platform_user_by_uuid(platform_user_id) {
+        Ok(user) => user,
+        Err(e) => {
+            tracing::error!("Error getting platform user: {:?}", e);
+            return ApiError::Unauthorized.into_response();
+        }
+    };
+
+    req.extensions_mut().insert(platform_user);
+    tracing::debug!("Exiting validate_platform_jwt");
     next.run(req).await
 }
 
