@@ -353,14 +353,17 @@ verify-pcr-custom:
 
 # SCP the Nix-built EIF to AWS parent instance (dev)
 scp-eif-to-aws-dev:
+    ssh -i $DEV_SSH_KEY $DEV_SERVER "rm -f ~/opensecret.eif"
     scp -i $DEV_SSH_KEY result/image.eif $DEV_SERVER:~/opensecret.eif
 
 # SCP the Nix-built EIF to AWS parent instance (prod)
 scp-eif-to-aws-prod:
+    ssh -i $PROD_SSH_KEY $PROD_SERVER "rm -f ~/opensecret.eif"
     scp -i $PROD_SSH_KEY result/image.eif $PROD_SERVER:~/opensecret.eif
 
 # SCP the Nix-built EIF to AWS parent instance (preview)
 scp-eif-to-aws-preview:
+    ssh -i $PREVIEW_SSH_KEY $PREVIEW_SERVER "rm -f ~/opensecret.eif"
     scp -i $PREVIEW_SSH_KEY result/image.eif $PREVIEW_SERVER:~/opensecret.eif
 
 # Stage to dev environment without debug mode (using Nix-built EIF)
