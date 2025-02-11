@@ -229,15 +229,24 @@ async fn create_mock_attestation_document(
         Value::Text("cabundle".into()),
         Value::Array(cabundle.into_iter().map(Value::Bytes).collect()),
     );
-    if let Some(p) = public_key {
-        document.insert(Value::Text("public_key".into()), Value::Bytes(p.to_vec()));
-    }
-    if let Some(u) = user_data {
-        document.insert(Value::Text("user_data".into()), Value::Bytes(u.to_vec()));
-    }
-    if let Some(n) = nonce {
-        document.insert(Value::Text("nonce".into()), Value::Bytes(n.to_vec()));
-    }
+
+    // Always include public_key, even if None
+    document.insert(
+        Value::Text("public_key".into()),
+        public_key.map_or(Value::Null, |p| Value::Bytes(p.to_vec())),
+    );
+
+    // Always include user_data, even if None
+    document.insert(
+        Value::Text("user_data".into()),
+        user_data.map_or(Value::Null, |u| Value::Bytes(u.into_vec())),
+    );
+
+    // Always include nonce, even if None
+    document.insert(
+        Value::Text("nonce".into()),
+        nonce.map_or(Value::Null, |n| Value::Bytes(n.into_vec())),
+    );
 
     trace!("Exiting create_mock_attestation_document");
     Value::Map(document)
@@ -463,4 +472,3 @@ async fn key_exchange(
         encrypted_session_key: general_purpose::STANDARD.encode(&encrypted_session_key),
     }))
 }
-
