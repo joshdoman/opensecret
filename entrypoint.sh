@@ -207,13 +207,13 @@ echo "127.0.0.8 api.resend.com" >> /etc/hosts
 log "Added api.resend.com to /etc/hosts"
 
 # Add continuum hostnames to /etc/hosts
-echo "127.0.0.2 api.ai.confidential.cloud" >> /etc/hosts
+echo "127.0.0.2 api.privatemode.ai" >> /etc/hosts
 echo "127.0.0.3 cdn.confidential.cloud" >> /etc/hosts
-echo "127.0.0.4 attestation.ai.confidential.cloud" >> /etc/hosts
-echo "127.0.0.5 weu.service.attest.azure.net" >> /etc/hosts
+echo "127.0.0.4 secret.privatemode.ai" >> /etc/hosts
+echo "127.0.0.5 coordinator.privatemode.ai" >> /etc/hosts
 echo "127.0.0.6 kdsintf.amd.com" >> /etc/hosts
 
-log "Added confidential.cloud, Azure, and AMD domains to /etc/hosts"
+log "Added privatemode.ai, confidential.cloud, and AMD domains to /etc/hosts"
 
 # Add GitHub OAuth hostnames to /etc/hosts
 echo "127.0.0.9 github.com" >> /etc/hosts
@@ -267,12 +267,12 @@ python3 /app/traffic_forwarder.py 127.0.0.2 443 3 8004 &
 log "Starting Continuum CDN traffic forwarder"
 python3 /app/traffic_forwarder.py 127.0.0.3 443 3 8005 &
 
-# Start the traffic forwarder for Continuum Attestation in the background
-log "Starting Continuum Attestation traffic forwarder"
-python3 /app/traffic_forwarder.py 127.0.0.4 3000 3 8006 &
+# Start the traffic forwarder for Continuum Secret Service in the background
+log "Starting Continuum Secret Service traffic forwarder"
+python3 /app/traffic_forwarder.py 127.0.0.4 443 3 8006 &
 
-# Start the traffic forwarder for Azure Attestation in the background
-log "Starting Azure Attestation traffic forwarder"
+# Start the traffic forwarder for Continuum Coordinator in the background
+log "Starting Continuum Coordinator traffic forwarder"
 python3 /app/traffic_forwarder.py 127.0.0.5 443 3 8007 &
 
 # Start the traffic forwarder for AMD KDS Interface in the background
@@ -307,30 +307,6 @@ python3 /app/traffic_forwarder.py 127.0.0.14 443 3 8017 &
 log "Waiting for forwarders to start"
 sleep 5
 
-# Fetch the current Azure Attestation subdomain
-log "Fetching current Azure Attestation subdomain"
-manifest=$(curl -s https://cdn.confidential.cloud/continuum/v1/manifest.toml)
-azure_subdomain=$(echo "$manifest" | awk '/^\[attestationService\.cpu\.azureSEVSNP\]/{flag=1; next} /^\[/{flag=0} flag && /^maaURL *=/{print $3; exit}' | tr -d '"' | awk -F[/:/.] '{print $4}')
-
-if [ -z "$azure_subdomain" ]; then
-    log "Error: Failed to extract Azure Attestation subdomain from manifest"
-    exit 1
-fi
-
-log "Extracted Azure Attestation subdomain: $azure_subdomain"
-
-echo "127.0.0.7 ${azure_subdomain}.weu.attest.azure.net" >> /etc/hosts
-
-log "Added continuum azure subdomain to host"
-
-# Start the traffic forwarder for Azure Continuum Attestation in the background
-log "Starting Azure Continuum Attestation traffic forwarder"
-python3 /app/traffic_forwarder.py 127.0.0.7 443 3 8009 &
-
-# Wait for the forwarders to start
-log "Waiting for forwarders to start"
-sleep 2
-
 # Test the connection to PostgreSQL
 log "Testing connection to PostgreSQL:"
 if timeout 5 bash -c '</dev/tcp/127.0.0.1/5432'; then
@@ -347,7 +323,7 @@ else
     log "OpenAI API connection failed"
 fi
 
-# Test the connection to Continuum API (Note: This will only test if the port is open)
+# Test the connection to Continuum API
 log "Testing connection to Continuum API:"
 if timeout 5 bash -c '</dev/tcp/127.0.0.2/443'; then
     log "Continuum API connection successful"
@@ -362,18 +338,18 @@ else
     log "Continuum CDN connection failed"
 fi
 
-log "Testing connection to Continuum Attestation:"
-if timeout 5 bash -c '</dev/tcp/127.0.0.4/3000'; then
-    log "Continuum Attestation connection successful"
+log "Testing connection to Continuum Secret Service:"
+if timeout 5 bash -c '</dev/tcp/127.0.0.4/443'; then
+    log "Continuum Secret Service connection successful"
 else
-    log "Continuum Attestation connection failed"
+    log "Continuum Secret Service connection failed"
 fi
 
-log "Testing connection to Azure Attestation:"
+log "Testing connection to Continuum Coordinator:"
 if timeout 5 bash -c '</dev/tcp/127.0.0.5/443'; then
-    log "Azure Attestation connection successful"
+    log "Continuum Coordinator connection successful"
 else
-    log "Azure Attestation connection failed"
+    log "Continuum Coordinator connection failed"
 fi
 
 log "Testing connection to AMD KDS Interface:"
@@ -383,11 +359,12 @@ else
     log "AMD KDS Interface connection failed"
 fi
 
-log "Testing connection to Azure Continuum Attestation:"
+# Test the connection to Azure Attestation
+log "Testing connection to Azure Attestation:"
 if timeout 5 bash -c '</dev/tcp/127.0.0.7/443'; then
-    log "Azure Continuum Attestation connection successful"
+    log "Azure Attestation connection successful"
 else
-    log "Azure Continuum Attestation connection failed"
+    log "Azure Attestation connection failed"
 fi
 
 # Test the connection to GitHub

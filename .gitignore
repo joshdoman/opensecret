@@ -26,3 +26,8 @@ Thumbs.db
 
 # Continuum local files
 continuum-manifests/
+contrast/
+manifests/
+
+# AI Prompts
+.prompts/
