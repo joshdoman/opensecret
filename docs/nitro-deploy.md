@@ -779,45 +779,6 @@ A restart should not be needed but if you need to:
 sudo systemctl restart vsock-billing-proxy.service
 ```
 
-### Continuum Attestation Updator
-
-We need to run a script on the parent that updates the URL for the continuum azure attestation endpoint. 
-
-On the parent: 
-
-```
-scp update_continuum_url.sh ec2-user@[aws-parent-instance-ip]:~/
-```
-
-```
-sudo vim /etc/systemd/system/update-continuum-url.service
-```
-
-```
-[Unit]
-Description=Update Continuum URL Service
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-ExecStart=/home/ec2-user/update_continuum_url.sh
-User=ec2-user
-Group=ec2-user
-Type=simple
-Restart=on-failure
-RestartSec=30s
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```
-sudo systemctl daemon-reload
-sudo systemctl enable update-continuum-url.service
-sudo systemctl start update-continuum-url.service
-sudo systemctl status update-continuum-url.service
-```
-
 ## KMS Key
 
 You need to create an AWS KMS key that the enclave can encrypt/decrypt things to. Name it according to your environment:

@@ -359,14 +359,6 @@ else
     log "AMD KDS Interface connection failed"
 fi
 
-# Test the connection to Azure Attestation
-log "Testing connection to Azure Attestation:"
-if timeout 5 bash -c '</dev/tcp/127.0.0.7/443'; then
-    log "Azure Attestation connection successful"
-else
-    log "Azure Attestation connection failed"
-fi
-
 # Test the connection to GitHub
 log "Testing connection to GitHub:"
 if timeout 5 bash -c '</dev/tcp/127.0.0.9/443'; then

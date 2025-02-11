@@ -187,18 +187,6 @@ update-continuum-proxy:
     {{container}} cp "${containerID}":/bin/privatemode-proxy ./continuum-proxy && \
     {{container}} rm "${containerID}"
 
-# SCP the update_continuum_url.sh script to the AWS parent instance (dev)
-scp-update-continuum-url-dev:
-    scp -i $DEV_SSH_KEY update_continuum_url.sh $DEV_SERVER:~/
-
-# SCP the update_continuum_url.sh script to the AWS parent instance (prod)
-scp-update-continuum-url-prod:
-    scp -i $PROD_SSH_KEY update_continuum_url.sh $PROD_SERVER:~/
-
-# SCP the update_continuum_url.sh script to the AWS parent instance (preview)
-scp-update-continuum-url-preview:
-    scp -i $PREVIEW_SSH_KEY update_continuum_url.sh $PREVIEW_SERVER:~/
-
 ### Enclave Management ###
 
 # Terminate the running enclave (dev)
