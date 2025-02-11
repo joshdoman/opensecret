@@ -183,8 +183,8 @@ diesel-migration-run-preview:
 
 # Update continuum-proxy
 update-continuum-proxy:
-    containerID=$({{container}} create --platform linux/arm64 ghcr.io/edgelesssys/continuum/continuum-proxy:v1.5.1-0.20250115175902-e274a3d28b59@sha256:c0e41ce62f9fdd210b40a6fd2e7d6f194d03e6bec3b34081b039b2f0a3eb67e4) && \
-    {{container}} cp "${containerID}":/bin/continuum-proxy ./continuum-proxy && \
+    containerID=$({{container}} create --platform linux/arm64 ghcr.io/edgelesssys/privatemode/privatemode-proxy:v1.7.1-0.20250211140643-2dd126d4748c) && \
+    {{container}} cp "${containerID}":/bin/privatemode-proxy ./continuum-proxy && \
     {{container}} rm "${containerID}"
 
 # SCP the update_continuum_url.sh script to the AWS parent instance (dev)

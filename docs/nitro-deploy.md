@@ -532,18 +532,17 @@ Create a vsock proxy service so that the continuum-proxy can talk to the Continu
 
 First configure the endpoint into its allowlist:
 
-```
+```sh
 sudo vim /etc/nitro_enclaves/vsock-proxy.yaml
 ```
 
-Add this line:
+Add these lines:
 ```
-- {address: api.ai.confidential.cloud, port: 443}
-- {address: cdn.confidential.cloud, port: 443}
-- {address: attestation.ai.confidential.cloud, port: 3000}
-- {address: weu.service.attest.azure.net, port: 443}
 - {address: kdsintf.amd.com, port: 443}
-- {address: continuumd50111e7.weu.attest.azure.net, port: 443}
+- {address: secret.privatemode.ai, port: 443}
+- {address: cdn.confidential.cloud, port: 443}
+- {address: api.privatemode.ai, port: 443}
+- {address: coordinator.privatemode.ai, port: 443}
 ```
 
 Restart the nitro vsock proxy service:
@@ -566,7 +565,7 @@ After=network.target
 
 [Service]
 User=root
-ExecStart=/usr/bin/vsock-proxy 8004 api.ai.confidential.cloud 443
+ExecStart=/usr/bin/vsock-proxy 8004 api.privatemode.ai 443
 Restart=always
 
 [Install]
@@ -593,40 +592,40 @@ Restart=always
 WantedBy=multi-user.target
 ```
 
-#### Continuum Attestation
+#### Continuum Secret Service
 ```
-sudo vim /etc/systemd/system/vsock-continuum-attestation.service
+sudo vim /etc/systemd/system/vsock-continuum-secret.service
 ```
 
 Add the following content:
 ```
 [Unit]
-Description=Vsock Continuum Attestation Proxy Service
+Description=Vsock Continuum Secret Service Proxy Service
 After=network.target
 
 [Service]
 User=root
-ExecStart=/usr/bin/vsock-proxy 8006 attestation.ai.confidential.cloud 3000
+ExecStart=/usr/bin/vsock-proxy 8006 secret.privatemode.ai 443
 Restart=always
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-#### Azure Attestation
+#### Continuum Coordinator
 ```
-sudo vim /etc/systemd/system/vsock-azure-attestation.service
+sudo vim /etc/systemd/system/vsock-continuum-coordinator.service
 ```
 
 Add the following content:
 ```
 [Unit]
-Description=Vsock Azure Attestation Proxy Service
+Description=Vsock Continuum Coordinator Proxy Service
 After=network.target
 
 [Service]
 User=root
-ExecStart=/usr/bin/vsock-proxy 8007 weu.service.attest.azure.net 443
+ExecStart=/usr/bin/vsock-proxy 8007 coordinator.privatemode.ai 443
 Restart=always
 
 [Install]
@@ -653,27 +652,6 @@ Restart=always
 WantedBy=multi-user.target
 ```
 
-#### Continuum Azure Attestation
-```
-sudo vim /etc/systemd/system/vsock-azure-continuum.service
-```
-
-Add the following content:
-```
-[Unit]
-Description=Vsock Azure Continuum Attestation Proxy Service
-After=network.target
-
-[Service]
-User=root
-ExecStart=/usr/bin/vsock-proxy 8009 continuumd50111e7.weu.attest.azure.net 443
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-
 Activate the services:
 
 ```
@@ -684,28 +662,24 @@ sudo systemctl status vsock-continuum-proxy.service
 sudo systemctl enable vsock-continuum-cdn.service
 sudo systemctl start vsock-continuum-cdn.service
 sudo systemctl status vsock-continuum-cdn.service
-sudo systemctl enable vsock-continuum-attestation.service
-sudo systemctl start vsock-continuum-attestation.service
-sudo systemctl status vsock-continuum-attestation.service
-sudo systemctl enable vsock-azure-attestation.service
-sudo systemctl start vsock-azure-attestation.service
-sudo systemctl status vsock-azure-attestation.service
+sudo systemctl enable vsock-continuum-secret.service
+sudo systemctl start vsock-continuum-secret.service
+sudo systemctl status vsock-continuum-secret.service
+sudo systemctl enable vsock-continuum-coordinator.service
+sudo systemctl start vsock-continuum-coordinator.service
+sudo systemctl status vsock-continuum-coordinator.service
 sudo systemctl enable vsock-amd-kds.service
 sudo systemctl start vsock-amd-kds.service
 sudo systemctl status vsock-amd-kds.service
-sudo systemctl enable vsock-azure-continuum.service
-sudo systemctl start vsock-azure-continuum.service
-sudo systemctl status vsock-azure-continuum.service
 ```
 
 If you need to restart these services:
 ```
 sudo systemctl restart vsock-continuum-proxy.service
 sudo systemctl restart vsock-continuum-cdn.service
-sudo systemctl restart vsock-continuum-attestation.service
-sudo systemctl restart vsock-azure-attestation.service
+sudo systemctl restart vsock-continuum-secret.service
+sudo systemctl restart vsock-continuum-coordinator.service
 sudo systemctl restart vsock-amd-kds.service
-sudo systemctl restart vsock-continuum-continuum.service
 ```
 
 #### Vsock AWS SQS proxy
