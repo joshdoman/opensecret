@@ -88,7 +88,7 @@ diesel::table! {
         id -> Int4,
         uuid -> Uuid,
         name -> Nullable<Text>,
-        email -> Nullable<Text>,
+        email -> Nullable<Citext>,
         password_enc -> Nullable<Bytea>,
         seed_enc -> Nullable<Bytea>,
         created_at -> Timestamptz,

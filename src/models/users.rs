@@ -11,7 +11,7 @@ pub enum UserError {
     DatabaseError(#[from] diesel::result::Error),
 }
 
-#[derive(QueryableByName, Queryable, AsChangeset, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Queryable, AsChangeset, Serialize, Deserialize, Clone, PartialEq)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 #[diesel(table_name = users)]
 pub struct User {
