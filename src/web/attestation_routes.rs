@@ -18,21 +18,16 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::{debug, error, trace};
 use uuid::Uuid;
-use x25519_dalek::SharedSecret;
 use yasna::models::ObjectIdentifier;
 use yasna::{construct_der, Tag};
 
 pub struct SessionState {
     session_key: [u8; 32],
-    shared_secret: SharedSecret,
 }
 
 impl SessionState {
-    pub fn new(shared_secret: SharedSecret, session_key: [u8; 32]) -> Self {
-        Self {
-            shared_secret,
-            session_key,
-        }
+    pub fn new(session_key: [u8; 32]) -> Self {
+        Self { session_key }
     }
 
     pub fn get_session_key(&self) -> [u8; 32] {
@@ -53,15 +48,6 @@ impl SessionState {
             tracing::error!("could not decrypt data: {e}");
             ApiError::InternalServerError
         })
-    }
-
-    pub fn encrypt(&self, data: &[u8], nonce: &[u8; 12]) -> Result<Vec<u8>, ApiError> {
-        let key = Key::from_slice(self.shared_secret.as_bytes());
-        let cipher = ChaCha20Poly1305::new(key);
-        let nonce = Nonce::from_slice(nonce);
-        cipher
-            .encrypt(nonce, data)
-            .map_err(|_| ApiError::InternalServerError)
     }
 }
 
@@ -464,7 +450,7 @@ async fn key_exchange(
     data.session_states
         .write()
         .await
-        .insert(session_id, SessionState::new(shared_secret, session_key));
+        .insert(session_id, SessionState::new(session_key));
 
     debug!("Exiting key_exchange function");
     Ok(Json(KeyExchangeResponse {
