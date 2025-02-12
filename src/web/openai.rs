@@ -47,6 +47,15 @@ async fn proxy_openai(
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     debug!("Entering proxy_openai function");
 
+    // Prevent guest users from using the OpenAI chat feature
+    if user.is_guest() {
+        error!(
+            "Guest user attempted to use OpenAI chat feature: {}",
+            user.uuid
+        );
+        return Err(ApiError::Unauthorized);
+    }
+
     // Check billing if client exists
     if let Some(billing_client) = &state.billing_client {
         debug!("Checking billing server for user {}", user.uuid);
