@@ -33,9 +33,13 @@ impl std::fmt::Display for SignatureType {
     }
 }
 
-pub fn sign_message(secret_key: &SecretKey, message_bytes: &[u8], algorithm: SigningAlgorithm) -> Result<SignMessageResponse, Error> {
+pub fn sign_message(
+    secret_key: &SecretKey,
+    message_bytes: &[u8],
+    algorithm: SigningAlgorithm,
+) -> Result<SignMessageResponse, Error> {
     let secp = Secp256k1::new();
-    
+
     // Hash the message
     let mut hasher = Sha256::new();
     hasher.update(message_bytes);
@@ -43,24 +47,25 @@ pub fn sign_message(secret_key: &SecretKey, message_bytes: &[u8], algorithm: Sig
     let message_hash_array: [u8; 32] = message_hash.into();
 
     // Create secp256k1 message from hash
-    let message = Message::from_digest_slice(&message_hash).map_err(|e| {
-        Error::SigningError(format!("Failed to create message from digest: {}", e))
-    })?;
+    let message = Message::from_digest_slice(&message_hash)
+        .map_err(|e| Error::SigningError(format!("Failed to create message from digest: {}", e)))?;
 
     // Sign with the specified algorithm
     let signature = match algorithm {
         SigningAlgorithm::Schnorr => {
             let keypair = secret_key.keypair(&secp);
             let random_bytes = generate_random::<32>();
-            SignatureType::Schnorr(secp.sign_schnorr_with_aux_rand(&message, &keypair, &random_bytes))
-        },
-        SigningAlgorithm::Ecdsa => {
-            SignatureType::Ecdsa(secp.sign_ecdsa(&message, secret_key))
-        },
+            SignatureType::Schnorr(secp.sign_schnorr_with_aux_rand(
+                &message,
+                &keypair,
+                &random_bytes,
+            ))
+        }
+        SigningAlgorithm::Ecdsa => SignatureType::Ecdsa(secp.sign_ecdsa(&message, secret_key)),
     };
 
     Ok(SignMessageResponse {
         signature,
         message_hash: message_hash_array,
     })
-} 
+}
