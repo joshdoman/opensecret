@@ -34,22 +34,24 @@ pub struct NewToken {
 
 #[derive(Debug, Clone)]
 pub struct JwtKeys {
-    pub(crate) legacy_secret: Vec<u8>, // For old HMAC tokens
-    signing_key: SecretKey,            // For ES256K
+    signing_key: SecretKey, // For ES256K
     secp: Secp256k1<All>,
 }
 
 impl JwtKeys {
     pub fn new(secret_bytes: Vec<u8>) -> Result<Self, Error> {
+        // check for size before slicing
+        if secret_bytes.len() < 32 {
+            return Err(Error::EncryptionError(
+                "Insufficient key length: must be at least 32 bytes".to_string(),
+            ));
+        }
+
         let secp = Secp256k1::new(); // Creates All context
         let signing_key = SecretKey::from_slice(&secret_bytes[..32])
             .map_err(|e| Error::EncryptionError(e.to_string()))?;
 
-        Ok(Self {
-            legacy_secret: secret_bytes,
-            signing_key,
-            secp,
-        })
+        Ok(Self { signing_key, secp })
     }
 
     pub fn public_key(&self) -> PublicKey {
@@ -267,28 +269,8 @@ pub(crate) fn validate_token(
             token
         }
         Err(e) => {
-            tracing::debug!("ES256K validation failed: {:?}, trying legacy HMAC", e);
-
-            // Try legacy HMAC validation
-            use jsonwebtoken::{decode, DecodingKey, Validation};
-            let mut hmac_validation = Validation::default();
-            hmac_validation.validate_exp = true;
-            hmac_validation.set_audience(&[expected_audience]); // Only accept expected audience
-
-            match decode::<CustomClaims>(
-                original_token,
-                &DecodingKey::from_secret(&data.config.jwt_keys.legacy_secret),
-                &hmac_validation,
-            ) {
-                Ok(token_data) => {
-                    tracing::debug!("Legacy HMAC validation successful");
-                    return Ok(token_data.claims);
-                }
-                Err(e) => {
-                    tracing::error!("Legacy HMAC validation failed: {:?}", e);
-                    return Err(ApiError::InvalidJwt);
-                }
-            }
+            tracing::debug!("ES256K validation failed: {:?}", e);
+            return Err(ApiError::InvalidJwt);
         }
     };
 
