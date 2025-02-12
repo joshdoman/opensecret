@@ -24,8 +24,8 @@ impl HealthResponse {
     }
 }
 
-/// IETF draft RFC for HTTP API Health Checks:
-/// https://datatracker.ietf.org/doc/html/draft-inadarei-api-health-check
+/// Health check endpoint following the IETF draft standard
+/// <https://datatracker.ietf.org/doc/html/draft-inadarei-api-health-check>
 pub async fn health_check() -> Result<Json<HealthResponse>, (StatusCode, String)> {
     Ok(Json(HealthResponse::new_ok()))
 }
