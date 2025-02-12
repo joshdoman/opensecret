@@ -40,6 +40,13 @@ pub struct JwtKeys {
 
 impl JwtKeys {
     pub fn new(secret_bytes: Vec<u8>) -> Result<Self, Error> {
+        // check for size before slicing
+        if secret_bytes.len() < 32 {
+            return Err(Error::EncryptionError(
+                "Insufficient key length: must be at least 32 bytes".to_string(),
+            ));
+        }
+
         let secp = Secp256k1::new(); // Creates All context
         let signing_key = SecretKey::from_slice(&secret_bytes[..32])
             .map_err(|e| Error::EncryptionError(e.to_string()))?;
