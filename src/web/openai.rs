@@ -244,9 +244,9 @@ async fn encrypt_and_process_event(
                             .unwrap_or(0) as i32;
 
                         // Calculate estimated cost with correct pricing
-                        let input_cost = BigDecimal::from_str("0.0000054").unwrap()
+                        let input_cost = BigDecimal::from_str("0.0000053").unwrap()
                             * BigDecimal::from(input_tokens);
-                        let output_cost = BigDecimal::from_str("0.0000162").unwrap()
+                        let output_cost = BigDecimal::from_str("0.0000053").unwrap()
                             * BigDecimal::from(output_tokens);
                         let total_cost = input_cost + output_cost;
 
