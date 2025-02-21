@@ -1,3 +1,4 @@
+use crate::web::encryption_middleware::EncryptedResponse;
 use crate::User;
 use crate::{
     db::DBError,
@@ -5,12 +6,11 @@ use crate::{
     jwt::{validate_token, NewToken, TokenType},
     models::email_verification::NewEmailVerification,
 };
-use crate::{web::encryption_middleware::EncryptedResponse, Credentials};
 use crate::{
     web::encryption_middleware::{decrypt_request, encrypt_response},
     Error,
 };
-use crate::{ApiError, AppState, RegisterCredentials};
+use crate::{ApiError, AppState};
 use axum::{
     extract::{Path, State},
     middleware::from_fn_with_state,
@@ -28,6 +28,7 @@ use uuid::Uuid;
 pub struct PasswordResetRequestPayload {
     email: String,
     hashed_secret: String,
+    client_id: Uuid,
 }
 
 #[derive(Deserialize, Clone)]
@@ -36,6 +37,23 @@ pub struct PasswordResetConfirmPayload {
     alphanumeric_code: String,
     plaintext_secret: String,
     new_password: String,
+    client_id: Uuid,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct Credentials {
+    pub email: Option<String>,
+    pub id: Option<Uuid>,
+    pub password: String,
+    pub client_id: Uuid,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct RegisterCredentials {
+    pub name: Option<String>,
+    pub email: Option<String>,
+    pub password: String,
+    pub client_id: Uuid,
 }
 
 pub fn router(app_state: Arc<AppState>) -> Router<()> {
@@ -128,11 +146,17 @@ pub async fn login(
 }
 
 async fn login_internal(data: Arc<AppState>, creds: Credentials) -> Result<AuthResponse, ApiError> {
-    // Get user based on provided credentials
+    // First get the project by client_id and verify it's active
+    let project = data
+        .db
+        .get_org_project_by_client_id(creds.client_id)
+        .map_err(|_| ApiError::BadRequest)?;
+
+    // Get user based on provided credentials, scoped to project
     let user = match (&creds.email, &creds.id) {
         (Some(email), _) => {
             // Try email first if provided
-            match data.db.get_user_by_email(email.clone()) {
+            match data.db.get_user_by_email(email.clone(), project.id) {
                 Ok(user) => user,
                 Err(DBError::UserNotFound) => {
                     error!("User not found by email: {email}");
@@ -150,6 +174,11 @@ async fn login_internal(data: Arc<AppState>, creds: Credentials) -> Result<AuthR
                 Ok(user) => {
                     if !user.is_guest() {
                         error!("ID-based login not allowed for users with email addresses");
+                        return Err(ApiError::InvalidUsernameOrPassword);
+                    }
+                    // Verify user belongs to the specified project
+                    if user.project_id != project.id {
+                        error!("User does not belong to specified project");
                         return Err(ApiError::InvalidUsernameOrPassword);
                     }
                     user
@@ -177,7 +206,10 @@ async fn login_internal(data: Arc<AppState>, creds: Credentials) -> Result<AuthR
     }
 
     // Proceed with password authentication
-    match data.authenticate_user(creds).await {
+    match data
+        .authenticate_user(creds.email, creds.id, creds.password, project.id)
+        .await
+    {
         Ok(Some(authenticated_user)) => {
             let access_token = NewToken::new(&authenticated_user, TokenType::Access, &data)?;
             let refresh_token = NewToken::new(&authenticated_user, TokenType::Refresh, &data)?;
@@ -248,6 +280,7 @@ pub async fn register(
             email: creds.email,
             id: Some(user.uuid),
             password: creds.password,
+            client_id: creds.client_id,
         },
     )
     .await?;
@@ -278,18 +311,13 @@ pub async fn handle_new_user_registration(
         if let Some(email) = user.get_email() {
             let email = email.to_string();
             let verification_code = verification.verification_code;
-            let app_mode = data.app_mode.clone();
-            let resend_api_key = data.resend_api_key.clone();
+            let data = data.clone();
+            let project_id = user.project_id;
             spawn(async move {
-                match send_verification_email(app_mode, resend_api_key, email, verification_code)
-                    .await
+                if let Err(e) =
+                    send_verification_email(&data, project_id, email, verification_code).await
                 {
-                    Ok(_) => {
-                        tracing::debug!("Sent verification email");
-                    }
-                    Err(e) => {
-                        tracing::error!("Could not send verification email: {e}");
-                    }
+                    tracing::error!("Could not send verification email: {e}");
                 }
             });
         }
@@ -298,16 +326,11 @@ pub async fn handle_new_user_registration(
     // Only send welcome email if user has an email
     if !user.is_guest() {
         let welcome_email = user.get_email().unwrap().to_string(); // Safe to unwrap since we checked is_guest()
-        let app_mode = data.app_mode.clone();
-        let resend_api_key = data.resend_api_key.clone();
+        let data = data.clone();
+        let project_id = user.project_id;
         spawn(async move {
-            match send_hello_email(app_mode, resend_api_key, welcome_email).await {
-                Ok(_) => {
-                    tracing::debug!("Scheduled welcome email");
-                }
-                Err(e) => {
-                    tracing::error!("Could not schedule welcome email: {e}");
-                }
+            if let Err(e) = send_hello_email(&data, project_id, welcome_email).await {
+                tracing::error!("Could not schedule welcome email: {e}");
             }
         });
     }
@@ -388,8 +411,14 @@ pub async fn password_reset_request(
 ) -> Result<Json<EncryptedResponse<serde_json::Value>>, ApiError> {
     debug!("Entering password_reset_request function");
 
+    // Get project by client_id
+    let project = data
+        .db
+        .get_org_project_by_client_id(payload.client_id)
+        .map_err(|_| ApiError::BadRequest)?;
+
     // Check if user exists and is not an OAuth-only user
-    match data.db.get_user_by_email(payload.email.clone()) {
+    match data.db.get_user_by_email(payload.email.clone(), project.id) {
         Ok(user) => {
             if user.password_enc.is_none() {
                 error!("OAuth-only user attempted to reset password");
@@ -415,7 +444,7 @@ pub async fn password_reset_request(
 
     // Proceed with password reset request
     let _ = data
-        .create_password_reset_request(payload.email.clone(), payload.hashed_secret)
+        .create_password_reset_request(payload.email.clone(), payload.hashed_secret, project.id)
         .await
         .map_err(|e| {
             error!("Error in create_password_reset_request: {:?}", e);
@@ -437,8 +466,14 @@ pub async fn password_reset_confirm(
 ) -> Result<Json<EncryptedResponse<serde_json::Value>>, ApiError> {
     debug!("Entering password_reset_confirm function");
 
+    // Get project by client_id
+    let project = data
+        .db
+        .get_org_project_by_client_id(payload.client_id)
+        .map_err(|_| ApiError::BadRequest)?;
+
     // Check if user exists and is not an OAuth-only user
-    match data.db.get_user_by_email(payload.email.clone()) {
+    match data.db.get_user_by_email(payload.email.clone(), project.id) {
         Ok(user) => {
             if user.password_enc.is_none() {
                 error!("OAuth-only user attempted to reset password");
@@ -461,6 +496,7 @@ pub async fn password_reset_confirm(
         payload.alphanumeric_code,
         payload.plaintext_secret,
         payload.new_password,
+        project.id,
     )
     .await
     .map_err(|e| match e {

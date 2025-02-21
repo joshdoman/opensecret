@@ -23,6 +23,7 @@ pub struct User {
     seed_enc: Option<Vec<u8>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub project_id: i32,
 }
 
 impl User {
@@ -52,11 +53,39 @@ impl User {
     pub fn get_by_email(
         conn: &mut PgConnection,
         lookup_email: String,
+        lookup_project_id: i32,
     ) -> Result<Option<User>, UserError> {
         users::table
             .filter(users::email.eq(lookup_email))
+            .filter(users::project_id.eq(lookup_project_id))
             .first::<User>(conn)
             .optional()
+            .map_err(UserError::DatabaseError)
+    }
+
+    pub fn get_all_for_project(
+        conn: &mut PgConnection,
+        lookup_project_id: i32,
+        page: i64,
+        per_page: i64,
+    ) -> Result<Vec<User>, UserError> {
+        users::table
+            .filter(users::project_id.eq(lookup_project_id))
+            .offset(page * per_page)
+            .limit(per_page)
+            .load::<User>(conn)
+            .map_err(UserError::DatabaseError)
+    }
+
+    pub fn get_count_for_project(
+        conn: &mut PgConnection,
+        lookup_project_id: i32,
+    ) -> Result<i64, UserError> {
+        use diesel::dsl::count;
+        users::table
+            .filter(users::project_id.eq(lookup_project_id))
+            .select(count(users::id))
+            .first(conn)
             .map_err(UserError::DatabaseError)
     }
 
@@ -135,15 +164,17 @@ pub struct NewUser {
     pub email: Option<String>,
     pub password_enc: Option<Vec<u8>>,
     pub seed_enc: Option<Vec<u8>>,
+    pub project_id: i32,
 }
 
 impl NewUser {
-    pub fn new(email: Option<String>, password_enc: Option<Vec<u8>>) -> Self {
+    pub fn new(email: Option<String>, password_enc: Option<Vec<u8>>, project_id: i32) -> Self {
         NewUser {
             name: None,
             email,
             password_enc,
             seed_enc: None,
+            project_id,
         }
     }
 

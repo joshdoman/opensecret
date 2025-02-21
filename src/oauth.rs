@@ -3,51 +3,39 @@ use crate::models::oauth::NewOAuthProvider;
 use crate::Error;
 use async_trait::async_trait;
 use oauth2::{
-    basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, RedirectUrl,
-    Scope, TokenResponse, TokenUrl,
+    basic::BasicClient, AuthUrl, ClientId, ClientSecret, CsrfToken, RedirectUrl, Scope, TokenUrl,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
+use uuid::Uuid;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthState {
+    pub csrf_token: String,
+    pub client_id: Uuid,
+}
 
 #[derive(Debug, Clone)]
 pub struct GithubProvider {
     pub auth_url: String,
     pub token_url: String,
     pub user_info_url: String,
-    pub client: BasicClient,
-    pub state_store: Arc<RwLock<HashMap<String, CsrfToken>>>,
+    pub state_store: Arc<RwLock<HashMap<String, OAuthState>>>,
 }
 
 impl GithubProvider {
-    pub async fn new(
-        db: Arc<dyn DBConnection + Send + Sync>,
-        client_id: String,
-        client_secret: String,
-        redirect_url: String,
-    ) -> Result<Self, Error> {
-        let auth_url = AuthUrl::new("https://github.com/login/oauth/authorize".to_string())
-            .map_err(|e| Error::OAuthError(format!("Invalid auth URL: {}", e)))?;
-        let token_url = TokenUrl::new("https://github.com/login/oauth/access_token".to_string())
-            .map_err(|e| Error::OAuthError(format!("Invalid token URL: {}", e)))?;
-
-        let client = BasicClient::new(
-            ClientId::new(client_id),
-            Some(ClientSecret::new(client_secret)),
-            auth_url.clone(),
-            Some(token_url.clone()),
-        )
-        .set_redirect_uri(
-            RedirectUrl::new(redirect_url)
-                .map_err(|e| Error::OAuthError(format!("Invalid redirect URL: {}", e)))?,
-        );
+    pub async fn new(db: Arc<dyn DBConnection + Send + Sync>) -> Result<Self, Error> {
+        let auth_url = "https://github.com/login/oauth/authorize".to_string();
+        let token_url = "https://github.com/login/oauth/access_token".to_string();
+        let user_info_url = "https://api.github.com/user".to_string();
 
         let provider = Self {
-            auth_url: auth_url.to_string(),
-            token_url: token_url.to_string(),
-            user_info_url: "https://api.github.com/user".to_string(),
-            client,
+            auth_url,
+            token_url,
+            user_info_url,
             state_store: Arc::new(RwLock::new(HashMap::new())),
         };
 
@@ -58,35 +46,52 @@ impl GithubProvider {
         Ok(provider)
     }
 
-    pub async fn generate_authorize_url(&self) -> (String, CsrfToken) {
-        let (auth_url, csrf_token) = self
-            .client
+    pub async fn build_client(
+        &self,
+        client_id: String,
+        client_secret: String,
+        redirect_url: String,
+    ) -> Result<BasicClient, Error> {
+        let auth_url = AuthUrl::new(self.auth_url.clone())
+            .map_err(|e| Error::OAuthError(format!("Invalid auth URL: {}", e)))?;
+        let token_url = TokenUrl::new(self.token_url.clone())
+            .map_err(|e| Error::OAuthError(format!("Invalid token URL: {}", e)))?;
+
+        Ok(BasicClient::new(
+            ClientId::new(client_id),
+            Some(ClientSecret::new(client_secret)),
+            auth_url,
+            Some(token_url),
+        )
+        .set_redirect_uri(
+            RedirectUrl::new(redirect_url)
+                .map_err(|e| Error::OAuthError(format!("Invalid redirect URL: {}", e)))?,
+        ))
+    }
+
+    pub async fn generate_authorize_url(&self, client: &BasicClient) -> (String, CsrfToken) {
+        let (auth_url, csrf_token) = client
             .authorize_url(CsrfToken::new_random)
             .add_scope(Scope::new("user:email".to_string()))
             .url();
 
-        // Store the CSRF token
-        self.state_store
-            .write()
-            .await
-            .insert(csrf_token.secret().clone(), csrf_token.clone());
-
         (auth_url.to_string(), csrf_token)
     }
 
-    pub async fn validate_state(&self, state: &str) -> bool {
-        self.state_store.read().await.contains_key(state)
+    pub async fn store_state(&self, csrf_token: &str, state: OAuthState) {
+        self.state_store
+            .write()
+            .await
+            .insert(csrf_token.to_string(), state);
     }
 
-    pub async fn exchange_code(&self, code: String) -> Result<oauth2::AccessToken, Error> {
-        let token_result = self
-            .client
-            .exchange_code(AuthorizationCode::new(code))
-            .request_async(oauth2::reqwest::async_http_client)
-            .await
-            .map_err(|e| Error::OAuthError(format!("Failed to exchange code: {}", e)))?;
-
-        Ok(token_result.access_token().clone())
+    pub async fn validate_state(&self, state: &OAuthState) -> bool {
+        if let Some(stored_state) = self.state_store.read().await.get(&state.csrf_token) {
+            // Validate both the CSRF token and the client_id match
+            stored_state == state
+        } else {
+            false
+        }
     }
 
     async fn ensure_provider_exists(
@@ -128,38 +133,19 @@ pub struct GoogleProvider {
     pub auth_url: String,
     pub token_url: String,
     pub user_info_url: String,
-    pub client: BasicClient,
-    pub state_store: Arc<RwLock<HashMap<String, CsrfToken>>>,
+    pub state_store: Arc<RwLock<HashMap<String, OAuthState>>>,
 }
 
 impl GoogleProvider {
-    pub async fn new(
-        db: Arc<dyn DBConnection + Send + Sync>,
-        client_id: String,
-        client_secret: String,
-        redirect_url: String,
-    ) -> Result<Self, Error> {
-        let auth_url = AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".to_string())
-            .map_err(|e| Error::OAuthError(format!("Invalid auth URL: {}", e)))?;
-        let token_url = TokenUrl::new("https://oauth2.googleapis.com/token".to_string())
-            .map_err(|e| Error::OAuthError(format!("Invalid token URL: {}", e)))?;
-
-        let client = BasicClient::new(
-            ClientId::new(client_id),
-            Some(ClientSecret::new(client_secret)),
-            auth_url.clone(),
-            Some(token_url.clone()),
-        )
-        .set_redirect_uri(
-            RedirectUrl::new(redirect_url)
-                .map_err(|e| Error::OAuthError(format!("Invalid redirect URL: {}", e)))?,
-        );
+    pub async fn new(db: Arc<dyn DBConnection + Send + Sync>) -> Result<Self, Error> {
+        let auth_url = "https://accounts.google.com/o/oauth2/v2/auth".to_string();
+        let token_url = "https://oauth2.googleapis.com/token".to_string();
+        let user_info_url = "https://www.googleapis.com/oauth2/v3/userinfo".to_string();
 
         let provider = Self {
-            auth_url: auth_url.to_string(),
-            token_url: token_url.to_string(),
-            user_info_url: "https://www.googleapis.com/oauth2/v3/userinfo".to_string(),
-            client,
+            auth_url,
+            token_url,
+            user_info_url,
             state_store: Arc::new(RwLock::new(HashMap::new())),
         };
 
@@ -170,36 +156,53 @@ impl GoogleProvider {
         Ok(provider)
     }
 
-    pub async fn generate_authorize_url(&self) -> (String, CsrfToken) {
-        let (auth_url, csrf_token) = self
-            .client
+    pub async fn build_client(
+        &self,
+        client_id: String,
+        client_secret: String,
+        redirect_url: String,
+    ) -> Result<BasicClient, Error> {
+        let auth_url = AuthUrl::new(self.auth_url.clone())
+            .map_err(|e| Error::OAuthError(format!("Invalid auth URL: {}", e)))?;
+        let token_url = TokenUrl::new(self.token_url.clone())
+            .map_err(|e| Error::OAuthError(format!("Invalid token URL: {}", e)))?;
+
+        Ok(BasicClient::new(
+            ClientId::new(client_id),
+            Some(ClientSecret::new(client_secret)),
+            auth_url,
+            Some(token_url),
+        )
+        .set_redirect_uri(
+            RedirectUrl::new(redirect_url)
+                .map_err(|e| Error::OAuthError(format!("Invalid redirect URL: {}", e)))?,
+        ))
+    }
+
+    pub async fn generate_authorize_url(&self, client: &BasicClient) -> (String, CsrfToken) {
+        let (auth_url, csrf_token) = client
             .authorize_url(CsrfToken::new_random)
             .add_scope(Scope::new("email".to_string()))
             .add_scope(Scope::new("profile".to_string()))
             .url();
 
-        // Store the CSRF token
-        self.state_store
-            .write()
-            .await
-            .insert(csrf_token.secret().clone(), csrf_token.clone());
-
         (auth_url.to_string(), csrf_token)
     }
 
-    pub async fn validate_state(&self, state: &str) -> bool {
-        self.state_store.read().await.contains_key(state)
+    pub async fn store_state(&self, csrf_token: &str, state: OAuthState) {
+        self.state_store
+            .write()
+            .await
+            .insert(csrf_token.to_string(), state);
     }
 
-    pub async fn exchange_code(&self, code: String) -> Result<oauth2::AccessToken, Error> {
-        let token_result = self
-            .client
-            .exchange_code(AuthorizationCode::new(code))
-            .request_async(oauth2::reqwest::async_http_client)
-            .await
-            .map_err(|e| Error::OAuthError(format!("Failed to exchange code: {}", e)))?;
-
-        Ok(token_result.access_token().clone())
+    pub async fn validate_state(&self, state: &OAuthState) -> bool {
+        if let Some(stored_state) = self.state_store.read().await.get(&state.csrf_token) {
+            // Validate both the CSRF token and the client_id match
+            stored_state == state
+        } else {
+            false
+        }
     }
 
     async fn ensure_provider_exists(
@@ -237,44 +240,28 @@ impl GoogleProvider {
 }
 
 #[async_trait]
-pub trait OAuthProvider: Send + Sync {
-    async fn generate_authorize_url(&self) -> (String, CsrfToken);
-    async fn validate_state(&self, state: &str) -> bool;
-    async fn exchange_code(&self, code: String) -> Result<oauth2::AccessToken, Error>;
-}
-
-#[async_trait]
-impl OAuthProvider for GithubProvider {
-    async fn generate_authorize_url(&self) -> (String, CsrfToken) {
-        self.generate_authorize_url().await
+pub trait OAuthProvider: Send + Sync + 'static {
+    fn as_github(&self) -> Option<&GithubProvider> {
+        None
     }
 
-    async fn validate_state(&self, state: &str) -> bool {
-        self.validate_state(state).await
+    fn as_google(&self) -> Option<&GoogleProvider> {
+        None
     }
 
-    async fn exchange_code(&self, code: String) -> Result<oauth2::AccessToken, Error> {
-        self.exchange_code(code).await
-    }
-}
-
-#[async_trait]
-impl OAuthProvider for GoogleProvider {
-    async fn generate_authorize_url(&self) -> (String, CsrfToken) {
-        self.generate_authorize_url().await
-    }
-
-    async fn validate_state(&self, state: &str) -> bool {
-        self.validate_state(state).await
-    }
-
-    async fn exchange_code(&self, code: String) -> Result<oauth2::AccessToken, Error> {
-        self.exchange_code(code).await
-    }
+    async fn generate_authorize_url(&self, client: &BasicClient) -> (String, CsrfToken);
+    async fn store_state(&self, csrf_token: &str, state: OAuthState);
+    async fn validate_state(&self, state: &OAuthState) -> bool;
+    async fn build_client(
+        &self,
+        client_id: String,
+        client_secret: String,
+        redirect_url: String,
+    ) -> Result<BasicClient, Error>;
 }
 
 pub struct OAuthManager {
-    providers: HashMap<String, Box<dyn OAuthProvider + Send + Sync>>,
+    providers: HashMap<String, Box<dyn OAuthProvider>>,
 }
 
 impl OAuthManager {
@@ -284,11 +271,69 @@ impl OAuthManager {
         }
     }
 
-    pub fn add_provider(&mut self, name: String, provider: Box<dyn OAuthProvider + Send + Sync>) {
+    pub fn add_provider(&mut self, name: String, provider: Box<dyn OAuthProvider>) {
         self.providers.insert(name, provider);
     }
 
-    pub fn get_provider(&self, name: &str) -> Option<&(dyn OAuthProvider + Send + Sync)> {
+    pub fn get_provider(&self, name: &str) -> Option<&dyn OAuthProvider> {
         self.providers.get(name).map(|p| p.as_ref())
+    }
+}
+
+#[async_trait]
+impl OAuthProvider for GithubProvider {
+    fn as_github(&self) -> Option<&GithubProvider> {
+        Some(self)
+    }
+
+    async fn generate_authorize_url(&self, client: &BasicClient) -> (String, CsrfToken) {
+        self.generate_authorize_url(client).await
+    }
+
+    async fn store_state(&self, csrf_token: &str, state: OAuthState) {
+        self.store_state(csrf_token, state).await
+    }
+
+    async fn validate_state(&self, state: &OAuthState) -> bool {
+        self.validate_state(state).await
+    }
+
+    async fn build_client(
+        &self,
+        client_id: String,
+        client_secret: String,
+        redirect_url: String,
+    ) -> Result<BasicClient, Error> {
+        self.build_client(client_id, client_secret, redirect_url)
+            .await
+    }
+}
+
+#[async_trait]
+impl OAuthProvider for GoogleProvider {
+    fn as_google(&self) -> Option<&GoogleProvider> {
+        Some(self)
+    }
+
+    async fn generate_authorize_url(&self, client: &BasicClient) -> (String, CsrfToken) {
+        self.generate_authorize_url(client).await
+    }
+
+    async fn store_state(&self, csrf_token: &str, state: OAuthState) {
+        self.store_state(csrf_token, state).await
+    }
+
+    async fn validate_state(&self, state: &OAuthState) -> bool {
+        self.validate_state(state).await
+    }
+
+    async fn build_client(
+        &self,
+        client_id: String,
+        client_secret: String,
+        redirect_url: String,
+    ) -> Result<BasicClient, Error> {
+        self.build_client(client_id, client_secret, redirect_url)
+            .await
     }
 }
