@@ -13,6 +13,9 @@ use crate::models::orgs::{NewOrg, Org, OrgError};
 use crate::models::password_reset::{
     NewPasswordResetRequest, PasswordResetError, PasswordResetRequest,
 };
+use crate::models::platform_email_verification::{
+    NewPlatformEmailVerification, PlatformEmailVerification, PlatformEmailVerificationError,
+};
 use crate::models::platform_users::{NewPlatformUser, PlatformUser, PlatformUserError};
 use crate::models::project_settings::OAuthSettings;
 use crate::models::project_settings::{
@@ -79,6 +82,10 @@ pub enum DBError {
     PlatformUserError(#[from] PlatformUserError),
     #[error("Platform user not found")]
     PlatformUserNotFound,
+    #[error("Platform email verification error: {0}")]
+    PlatformEmailVerificationError(#[from] PlatformEmailVerificationError),
+    #[error("Platform email verification not found")]
+    PlatformEmailVerificationNotFound,
     #[error("Org membership error: {0}")]
     OrgMembershipError(#[from] OrgMembershipError),
     #[error("Org membership not found")]
@@ -313,6 +320,42 @@ pub trait DBConnection {
         project_id: i32,
         settings: OAuthSettings,
     ) -> Result<ProjectSetting, DBError>;
+
+    // Platform email verification methods
+    fn create_platform_email_verification(
+        &self,
+        new_verification: NewPlatformEmailVerification,
+    ) -> Result<PlatformEmailVerification, DBError>;
+
+    fn get_platform_email_verification_by_id(
+        &self,
+        id: i32,
+    ) -> Result<PlatformEmailVerification, DBError>;
+
+    fn get_platform_email_verification_by_platform_user_id(
+        &self,
+        platform_user_id: Uuid,
+    ) -> Result<PlatformEmailVerification, DBError>;
+
+    fn get_platform_email_verification_by_code(
+        &self,
+        code: Uuid,
+    ) -> Result<PlatformEmailVerification, DBError>;
+
+    fn update_platform_email_verification(
+        &self,
+        verification: &PlatformEmailVerification,
+    ) -> Result<(), DBError>;
+
+    fn delete_platform_email_verification(
+        &self,
+        verification: &PlatformEmailVerification,
+    ) -> Result<(), DBError>;
+
+    fn verify_platform_email(
+        &self,
+        verification: &mut PlatformEmailVerification,
+    ) -> Result<(), DBError>;
 }
 
 pub(crate) struct PostgresConnection {
@@ -1279,6 +1322,104 @@ impl DBConnection for PostgresConnection {
             // Create new settings
             new_settings.insert(conn).map_err(DBError::from)
         }
+    }
+
+    // Platform email verification implementations
+    fn create_platform_email_verification(
+        &self,
+        new_verification: NewPlatformEmailVerification,
+    ) -> Result<PlatformEmailVerification, DBError> {
+        debug!("Creating new platform email verification");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = new_verification.insert(conn).map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!("Failed to create platform email verification: {:?}", e);
+        }
+        result
+    }
+
+    fn get_platform_email_verification_by_id(
+        &self,
+        id: i32,
+    ) -> Result<PlatformEmailVerification, DBError> {
+        debug!("Getting platform email verification by ID");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = PlatformEmailVerification::get_by_id(conn, id)?
+            .ok_or(DBError::PlatformEmailVerificationNotFound);
+        if let Err(ref e) = result {
+            error!("Failed to get platform email verification by ID: {:?}", e);
+        }
+        result
+    }
+
+    fn get_platform_email_verification_by_platform_user_id(
+        &self,
+        platform_user_id: Uuid,
+    ) -> Result<PlatformEmailVerification, DBError> {
+        debug!("Getting platform email verification by platform user ID");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = PlatformEmailVerification::get_by_platform_user_id(conn, platform_user_id)?
+            .ok_or(DBError::PlatformEmailVerificationNotFound);
+        if let Err(ref e) = result {
+            error!(
+                "Failed to get platform email verification by platform user ID: {:?}",
+                e
+            );
+        }
+        result
+    }
+
+    fn get_platform_email_verification_by_code(
+        &self,
+        code: Uuid,
+    ) -> Result<PlatformEmailVerification, DBError> {
+        debug!("Getting platform email verification by code");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = PlatformEmailVerification::get_by_verification_code(conn, code)?
+            .ok_or(DBError::PlatformEmailVerificationNotFound);
+        if let Err(ref e) = result {
+            error!("Failed to get platform email verification by code: {:?}", e);
+        }
+        result
+    }
+
+    fn update_platform_email_verification(
+        &self,
+        verification: &PlatformEmailVerification,
+    ) -> Result<(), DBError> {
+        debug!("Updating platform email verification");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = verification.update(conn).map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!("Failed to update platform email verification: {:?}", e);
+        }
+        result
+    }
+
+    fn delete_platform_email_verification(
+        &self,
+        verification: &PlatformEmailVerification,
+    ) -> Result<(), DBError> {
+        debug!("Deleting platform email verification");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = verification.delete(conn).map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!("Failed to delete platform email verification: {:?}", e);
+        }
+        result
+    }
+
+    fn verify_platform_email(
+        &self,
+        verification: &mut PlatformEmailVerification,
+    ) -> Result<(), DBError> {
+        debug!("Verifying platform email");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = verification.verify(conn).map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!("Failed to verify platform email: {:?}", e);
+        }
+        result
     }
 }
 

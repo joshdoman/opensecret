@@ -1,7 +1,9 @@
 use crate::{
     email::send_platform_verification_email,
     jwt::{NewToken, TokenType},
-    models::{email_verification::NewEmailVerification, platform_users::NewPlatformUser},
+    models::{
+        platform_email_verification::NewPlatformEmailVerification, platform_users::NewPlatformUser,
+    },
     web::encryption_middleware::{decrypt_request, encrypt_response, EncryptedResponse},
     ApiError, AppState,
 };
@@ -190,12 +192,12 @@ pub async fn register_platform_user(
             ApiError::InternalServerError
         })?;
 
-    // Create email verification
-    let new_verification = NewEmailVerification::new(platform_user.uuid, 24, false);
-    let verification = match data.db.create_email_verification(new_verification) {
+    // Create platform email verification
+    let new_verification = NewPlatformEmailVerification::new(platform_user.uuid, 24, false);
+    let verification = match data.db.create_platform_email_verification(new_verification) {
         Ok(v) => v,
         Err(e) => {
-            error!("Error creating email verification: {:?}", e);
+            error!("Error creating platform email verification: {:?}", e);
             return Err(ApiError::InternalServerError);
         }
     };
