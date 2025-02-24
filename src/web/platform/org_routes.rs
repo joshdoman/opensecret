@@ -106,15 +106,13 @@ pub struct CreateSecretRequest {
 
 #[derive(Serialize)]
 pub struct OrgResponse {
-    pub id: i32,
-    pub uuid: Uuid,
+    pub id: Uuid,
     pub name: String,
 }
 
 #[derive(Serialize)]
 pub struct ProjectResponse {
-    pub id: i32,
-    pub uuid: Uuid,
+    pub id: Uuid,
     pub client_id: Uuid,
     pub name: String,
     pub description: Option<String>,
@@ -123,7 +121,7 @@ pub struct ProjectResponse {
 
 #[derive(Serialize)]
 pub struct MembershipResponse {
-    pub platform_user_id: Uuid,
+    pub user_id: Uuid,
     pub role: String,
 }
 
@@ -343,8 +341,7 @@ async fn create_org(
         })?;
 
     let response = OrgResponse {
-        id: org.id,
-        uuid: org.uuid,
+        id: org.uuid,
         name: org.name,
     };
 
@@ -373,8 +370,7 @@ async fn list_orgs(
         match data.db.get_org_by_id(membership.org_id) {
             Ok(org) => {
                 orgs.push(OrgResponse {
-                    id: org.id,
-                    uuid: org.uuid,
+                    id: org.uuid,
                     name: org.name,
                 });
             }
@@ -394,26 +390,28 @@ async fn list_orgs(
 async fn delete_org(
     State(data): State<Arc<AppState>>,
     Extension(platform_user): Extension<PlatformUser>,
-    Path(org_id): Path<i32>,
+    Path(org_id): Path<Uuid>,
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<serde_json::Value>>, ApiError> {
     debug!("Deleting organization");
 
+    // Get org by UUID instead of ID
+    let org = data
+        .db
+        .get_org_by_uuid(org_id)
+        .map_err(|_| ApiError::NotFound)?;
+
     // Verify user has owner role
     let membership = data
         .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org_id)
+        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
         .map_err(|_| ApiError::Unauthorized)?;
 
     if membership.role != OrgRole::Owner.as_str() {
         return Err(ApiError::Unauthorized);
     }
 
-    // Get and delete the org
-    let org = data
-        .db
-        .get_org_by_id(org_id)
-        .map_err(|_| ApiError::NotFound)?;
+    // Delete the org
     data.db.delete_org(&org).map_err(|e| {
         error!("Failed to delete organization: {:?}", e);
         ApiError::InternalServerError
@@ -429,7 +427,7 @@ async fn delete_org(
 async fn create_project(
     State(data): State<Arc<AppState>>,
     Extension(platform_user): Extension<PlatformUser>,
-    Path(org_id): Path<i32>,
+    Path(org_id): Path<Uuid>,
     Extension(create_request): Extension<CreateProjectRequest>,
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<ProjectResponse>>, ApiError> {
@@ -441,10 +439,16 @@ async fn create_project(
         return Err(ApiError::BadRequest);
     }
 
+    // Get org by UUID
+    let org = data
+        .db
+        .get_org_by_uuid(org_id)
+        .map_err(|_| ApiError::NotFound)?;
+
     // Verify user has admin or owner role
     let membership = data
         .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org_id)
+        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
         .map_err(|_| ApiError::Unauthorized)?;
 
     let role: OrgRole = membership.role.into();
@@ -453,7 +457,7 @@ async fn create_project(
     }
 
     // Create the project
-    let new_project = NewOrgProject::new(org_id, create_request.name).with_description(
+    let new_project = NewOrgProject::new(org.id, create_request.name).with_description(
         create_request
             .description
             .unwrap_or_else(|| String::from("")),
@@ -465,8 +469,7 @@ async fn create_project(
     })?;
 
     let response = ProjectResponse {
-        id: project.id,
-        uuid: project.uuid,
+        id: project.uuid,
         client_id: project.client_id,
         name: project.name,
         description: project.description,
@@ -479,19 +482,25 @@ async fn create_project(
 async fn list_projects(
     State(data): State<Arc<AppState>>,
     Extension(platform_user): Extension<PlatformUser>,
-    Path(org_id): Path<i32>,
+    Path(org_id): Path<Uuid>,
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<Vec<ProjectResponse>>>, ApiError> {
     debug!("Listing projects");
 
+    // Get org by UUID
+    let org = data
+        .db
+        .get_org_by_uuid(org_id)
+        .map_err(|_| ApiError::NotFound)?;
+
     // Verify user has any role in the org
     let _membership = data
         .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org_id)
+        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
         .map_err(|_| ApiError::Unauthorized)?;
 
     // Get all projects
-    let projects = data.db.get_all_org_projects_for_org(org_id).map_err(|e| {
+    let projects = data.db.get_all_org_projects_for_org(org.id).map_err(|e| {
         error!("Failed to get projects: {:?}", e);
         ApiError::InternalServerError
     })?;
@@ -499,8 +508,7 @@ async fn list_projects(
     let response = projects
         .into_iter()
         .map(|p| ProjectResponse {
-            id: p.id,
-            uuid: p.uuid,
+            id: p.uuid,
             client_id: p.client_id,
             name: p.name,
             description: p.description,
@@ -514,16 +522,32 @@ async fn list_projects(
 async fn update_project(
     State(data): State<Arc<AppState>>,
     Extension(platform_user): Extension<PlatformUser>,
-    Path((org_id, project_id)): Path<(i32, i32)>,
+    Path((org_id, project_id)): Path<(Uuid, Uuid)>,
     Extension(update_request): Extension<UpdateProjectRequest>,
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<ProjectResponse>>, ApiError> {
     debug!("Updating project");
 
+    // Get org and project by UUID
+    let org = data
+        .db
+        .get_org_by_uuid(org_id)
+        .map_err(|_| ApiError::NotFound)?;
+
+    let project = data
+        .db
+        .get_org_project_by_uuid(project_id)
+        .map_err(|_| ApiError::NotFound)?;
+
+    // Ensure project belongs to org
+    if project.org_id != org.id {
+        return Err(ApiError::NotFound);
+    }
+
     // Verify user has admin or owner role
     let membership = data
         .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org_id)
+        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
         .map_err(|_| ApiError::Unauthorized)?;
 
     let role: OrgRole = membership.role.into();
@@ -531,34 +555,29 @@ async fn update_project(
         return Err(ApiError::Unauthorized);
     }
 
-    // Get and update the project
-    let mut project = data
-        .db
-        .get_org_project_by_id(project_id)
-        .map_err(|_| ApiError::NotFound)?;
-
+    // Update the project
+    let mut updated_project = project;
     if let Some(name) = update_request.name {
-        project.name = name;
+        updated_project.name = name;
     }
     if let Some(description) = update_request.description {
-        project.description = Some(description);
+        updated_project.description = Some(description);
     }
     if let Some(status) = update_request.status {
-        project.status = status;
+        updated_project.status = status;
     }
 
-    data.db.update_org_project(&project).map_err(|e| {
+    data.db.update_org_project(&updated_project).map_err(|e| {
         error!("Failed to update project: {:?}", e);
         ApiError::InternalServerError
     })?;
 
     let response = ProjectResponse {
-        id: project.id,
-        uuid: project.uuid,
-        client_id: project.client_id,
-        name: project.name,
-        description: project.description,
-        status: project.status,
+        id: updated_project.uuid,
+        client_id: updated_project.client_id,
+        name: updated_project.name,
+        description: updated_project.description,
+        status: updated_project.status,
     };
 
     encrypt_response(&data, &session_id, &response).await
@@ -567,15 +586,31 @@ async fn update_project(
 async fn delete_project(
     State(data): State<Arc<AppState>>,
     Extension(platform_user): Extension<PlatformUser>,
-    Path((org_id, project_id)): Path<(i32, i32)>,
+    Path((org_id, project_id)): Path<(Uuid, Uuid)>,
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<serde_json::Value>>, ApiError> {
     debug!("Deleting project");
 
+    // Get org and project by UUID
+    let org = data
+        .db
+        .get_org_by_uuid(org_id)
+        .map_err(|_| ApiError::NotFound)?;
+
+    let project = data
+        .db
+        .get_org_project_by_uuid(project_id)
+        .map_err(|_| ApiError::NotFound)?;
+
+    // Ensure project belongs to org
+    if project.org_id != org.id {
+        return Err(ApiError::NotFound);
+    }
+
     // Verify user has admin or owner role
     let membership = data
         .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org_id)
+        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
         .map_err(|_| ApiError::Unauthorized)?;
 
     let role: OrgRole = membership.role.into();
@@ -583,12 +618,7 @@ async fn delete_project(
         return Err(ApiError::Unauthorized);
     }
 
-    // Get and delete the project
-    let project = data
-        .db
-        .get_org_project_by_id(project_id)
-        .map_err(|_| ApiError::NotFound)?;
-
+    // Delete the project
     data.db.delete_org_project(&project).map_err(|e| {
         error!("Failed to delete project: {:?}", e);
         ApiError::InternalServerError
@@ -604,22 +634,22 @@ async fn delete_project(
 async fn create_invite(
     State(data): State<Arc<AppState>>,
     Extension(platform_user): Extension<PlatformUser>,
-    Path(org_id): Path<i32>,
+    Path(org_id): Path<Uuid>,
     Extension(create_request): Extension<CreateInviteRequest>,
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<InviteResponse>>, ApiError> {
     debug!("Creating invite");
 
-    // Get the org this user is making an invitation to
-    let org_details = data
+    // Get the org by UUID
+    let org = data
         .db
-        .get_org_by_id(org_id)
+        .get_org_by_uuid(org_id)
         .map_err(|_| ApiError::BadRequest)?;
 
     // Verify user has admin or owner role
     let membership = data
         .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org_id)
+        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
         .map_err(|_| ApiError::Unauthorized)?;
 
     let role: OrgRole = membership.role.into();
@@ -629,7 +659,7 @@ async fn create_invite(
 
     // Create the invite code with the specified role (or default admin)
     let new_invite = NewInviteCode::new(
-        org_id,
+        org.id,
         create_request.email.clone(),
         create_request.role.as_str().to_string(),
         24, // 24 hour expiry
@@ -646,14 +676,8 @@ async fn create_invite(
     let app_mode = data.app_mode.clone();
     let resend_api_key = data.resend_api_key.clone();
     spawn(async move {
-        if let Err(e) = send_platform_invite_email(
-            app_mode,
-            resend_api_key,
-            email,
-            org_details.name,
-            invite_code,
-        )
-        .await
+        if let Err(e) =
+            send_platform_invite_email(app_mode, resend_api_key, email, org.name, invite_code).await
         {
             error!("Failed to send invite email: {:?}", e);
         }
@@ -667,21 +691,27 @@ async fn create_invite(
 async fn list_memberships(
     State(data): State<Arc<AppState>>,
     Extension(platform_user): Extension<PlatformUser>,
-    Path(org_id): Path<i32>,
+    Path(org_id): Path<Uuid>,
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<Vec<MembershipResponse>>>, ApiError> {
     debug!("Listing memberships");
 
+    // Get the org by UUID
+    let org = data
+        .db
+        .get_org_by_uuid(org_id)
+        .map_err(|_| ApiError::NotFound)?;
+
     // Verify user has any role in the org
     let _membership = data
         .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org_id)
+        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
         .map_err(|_| ApiError::Unauthorized)?;
 
     // Get all memberships
     let memberships = data
         .db
-        .get_all_org_memberships_for_org(org_id)
+        .get_all_org_memberships_for_org(org.id)
         .map_err(|e| {
             error!("Failed to get memberships: {:?}", e);
             ApiError::InternalServerError
@@ -690,7 +720,7 @@ async fn list_memberships(
     let response = memberships
         .into_iter()
         .map(|m| MembershipResponse {
-            platform_user_id: m.platform_user_id,
+            user_id: m.platform_user_id,
             role: m.role,
         })
         .collect();
@@ -701,16 +731,22 @@ async fn list_memberships(
 async fn update_membership(
     State(data): State<Arc<AppState>>,
     Extension(platform_user): Extension<PlatformUser>,
-    Path((org_id, user_id)): Path<(i32, Uuid)>,
+    Path((org_id, user_id)): Path<(Uuid, Uuid)>,
     Extension(update_request): Extension<UpdateMembershipRequest>,
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<MembershipResponse>>, ApiError> {
     debug!("Updating membership");
 
+    // Get the org by UUID
+    let org = data
+        .db
+        .get_org_by_uuid(org_id)
+        .map_err(|_| ApiError::NotFound)?;
+
     // Verify user has owner role
     let membership = data
         .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org_id)
+        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
         .map_err(|_| ApiError::Unauthorized)?;
 
     if membership.role != OrgRole::Owner.as_str() {
@@ -720,7 +756,7 @@ async fn update_membership(
     // Get and update the target membership
     let mut target_membership = data
         .db
-        .get_org_membership_by_platform_user_and_org(user_id, org_id)
+        .get_org_membership_by_platform_user_and_org(user_id, org.id)
         .map_err(|_| ApiError::NotFound)?;
 
     // Update role with transactional owner check
@@ -740,7 +776,7 @@ async fn update_membership(
         })?;
 
     let response = MembershipResponse {
-        platform_user_id: target_membership.platform_user_id,
+        user_id: target_membership.platform_user_id,
         role: target_membership.role,
     };
 
@@ -750,15 +786,21 @@ async fn update_membership(
 async fn delete_membership(
     State(data): State<Arc<AppState>>,
     Extension(platform_user): Extension<PlatformUser>,
-    Path((org_id, user_id)): Path<(i32, Uuid)>,
+    Path((org_id, user_id)): Path<(Uuid, Uuid)>,
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<serde_json::Value>>, ApiError> {
     debug!("Deleting membership");
 
+    // Get the org by UUID
+    let org = data
+        .db
+        .get_org_by_uuid(org_id)
+        .map_err(|_| ApiError::NotFound)?;
+
     // Verify user has owner role
     let membership = data
         .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org_id)
+        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
         .map_err(|_| ApiError::Unauthorized)?;
 
     if membership.role != OrgRole::Owner.as_str() {
@@ -768,7 +810,7 @@ async fn delete_membership(
     // Get the target membership
     let target_membership = data
         .db
-        .get_org_membership_by_platform_user_and_org(user_id, org_id)
+        .get_org_membership_by_platform_user_and_org(user_id, org.id)
         .map_err(|_| ApiError::NotFound)?;
 
     // Delete with transactional owner check
@@ -847,7 +889,7 @@ async fn accept_invite(
 pub async fn create_secret(
     State(data): State<Arc<AppState>>,
     Extension(platform_user): Extension<PlatformUser>,
-    Path((org_id, project_id)): Path<(i32, i32)>,
+    Path((org_id, project_id)): Path<(Uuid, Uuid)>,
     Extension(create_request): Extension<CreateSecretRequest>,
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<SecretResponse>>, ApiError> {
@@ -859,26 +901,32 @@ pub async fn create_secret(
         return Err(ApiError::BadRequest);
     }
 
+    // Get org and project by UUID
+    let org = data
+        .db
+        .get_org_by_uuid(org_id)
+        .map_err(|_| ApiError::NotFound)?;
+
+    let project = data.db.get_org_project_by_uuid(project_id).map_err(|_| {
+        error!("Project not found");
+        ApiError::NotFound
+    })?;
+
+    // Ensure project belongs to org
+    if project.org_id != org.id {
+        error!("Project does not belong to organization");
+        return Err(ApiError::NotFound);
+    }
+
     // Verify user has admin or owner role
     let membership = data
         .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org_id)
+        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
         .map_err(|_| ApiError::Unauthorized)?;
 
     let role: OrgRole = membership.role.into();
     if !matches!(role, OrgRole::Owner | OrgRole::Admin) {
         return Err(ApiError::Unauthorized);
-    }
-
-    // Get the project to verify it exists and belongs to the org
-    let project = data.db.get_org_project_by_id(project_id).map_err(|_| {
-        error!("Project not found");
-        ApiError::NotFound
-    })?;
-
-    if project.org_id != org_id {
-        error!("Project does not belong to organization");
-        return Err(ApiError::NotFound);
     }
 
     // Decode base64 secret value to raw bytes
@@ -898,7 +946,7 @@ pub async fn create_secret(
 
     // Create the new secret
     let new_secret = NewOrgProjectSecret::new(
-        project_id,
+        project.id,
         create_request.key_name.clone(),
         encrypted_secret,
     );
@@ -920,32 +968,38 @@ pub async fn create_secret(
 async fn list_secrets(
     State(data): State<Arc<AppState>>,
     Extension(platform_user): Extension<PlatformUser>,
-    Path((org_id, project_id)): Path<(i32, i32)>,
+    Path((org_id, project_id)): Path<(Uuid, Uuid)>,
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<Vec<SecretResponse>>>, ApiError> {
     debug!("Listing project secrets");
 
-    // Verify user has any role in the org
-    let _membership = data
+    // Get org and project by UUID
+    let org = data
         .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org_id)
-        .map_err(|_| ApiError::Unauthorized)?;
+        .get_org_by_uuid(org_id)
+        .map_err(|_| ApiError::NotFound)?;
 
-    // Get the project to verify it exists and belongs to the org
-    let project = data.db.get_org_project_by_id(project_id).map_err(|_| {
+    let project = data.db.get_org_project_by_uuid(project_id).map_err(|_| {
         error!("Project not found");
         ApiError::NotFound
     })?;
 
-    if project.org_id != org_id {
+    // Ensure project belongs to org
+    if project.org_id != org.id {
         error!("Project does not belong to organization");
         return Err(ApiError::NotFound);
     }
 
+    // Verify user has any role in the org
+    let _membership = data
+        .db
+        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
+        .map_err(|_| ApiError::Unauthorized)?;
+
     // Get all secrets for the project
     let secrets = data
         .db
-        .get_all_org_project_secrets_for_project(project_id)
+        .get_all_org_project_secrets_for_project(project.id)
         .map_err(|e| {
             error!("Failed to get project secrets: {:?}", e);
             ApiError::InternalServerError
@@ -966,15 +1020,32 @@ async fn list_secrets(
 async fn delete_secret(
     State(data): State<Arc<AppState>>,
     Extension(platform_user): Extension<PlatformUser>,
-    Path((org_id, project_id, key_name)): Path<(i32, i32, String)>,
+    Path((org_id, project_id, key_name)): Path<(Uuid, Uuid, String)>,
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<serde_json::Value>>, ApiError> {
     debug!("Deleting project secret");
 
+    // Get org and project by UUID
+    let org = data
+        .db
+        .get_org_by_uuid(org_id)
+        .map_err(|_| ApiError::NotFound)?;
+
+    let project = data.db.get_org_project_by_uuid(project_id).map_err(|_| {
+        error!("Project not found");
+        ApiError::NotFound
+    })?;
+
+    // Ensure project belongs to org
+    if project.org_id != org.id {
+        error!("Project does not belong to organization");
+        return Err(ApiError::NotFound);
+    }
+
     // Verify user has admin or owner role
     let membership = data
         .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org_id)
+        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
         .map_err(|_| ApiError::Unauthorized)?;
 
     let role: OrgRole = membership.role.into();
@@ -982,21 +1053,10 @@ async fn delete_secret(
         return Err(ApiError::Unauthorized);
     }
 
-    // Get the project to verify it exists and belongs to the org
-    let project = data.db.get_org_project_by_id(project_id).map_err(|_| {
-        error!("Project not found");
-        ApiError::NotFound
-    })?;
-
-    if project.org_id != org_id {
-        error!("Project does not belong to organization");
-        return Err(ApiError::NotFound);
-    }
-
     // Get the secret
     let secret = data
         .db
-        .get_org_project_secret_by_key_name_and_project(&key_name, project_id)
+        .get_org_project_secret_by_key_name_and_project(&key_name, project.id)
         .map_err(|e| {
             error!("Failed to get project secret: {:?}", e);
             ApiError::InternalServerError
@@ -1022,27 +1082,33 @@ async fn delete_secret(
 async fn get_project_settings(
     State(data): State<Arc<AppState>>,
     Extension(platform_user): Extension<PlatformUser>,
-    Path((org_id, project_id, category)): Path<(i32, i32, String)>,
+    Path((org_id, project_id, category)): Path<(Uuid, Uuid, String)>,
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<ProjectSettingResponse>>, ApiError> {
     debug!("Getting project settings");
 
-    // Verify user has any role in the org
-    let _membership = data
+    // Get org and project by UUID
+    let org = data
         .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org_id)
-        .map_err(|_| ApiError::Unauthorized)?;
+        .get_org_by_uuid(org_id)
+        .map_err(|_| ApiError::NotFound)?;
 
-    // Get the project to verify it exists and belongs to the org
-    let project = data.db.get_org_project_by_id(project_id).map_err(|_| {
+    let project = data.db.get_org_project_by_uuid(project_id).map_err(|_| {
         error!("Project not found");
         ApiError::NotFound
     })?;
 
-    if project.org_id != org_id {
+    // Ensure project belongs to org
+    if project.org_id != org.id {
         error!("Project does not belong to organization");
         return Err(ApiError::NotFound);
     }
+
+    // Verify user has any role in the org
+    let _membership = data
+        .db
+        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
+        .map_err(|_| ApiError::Unauthorized)?;
 
     // Parse category
     let setting_category = match category.as_str() {
@@ -1056,7 +1122,7 @@ async fn get_project_settings(
     // Get settings
     let settings = data
         .db
-        .get_project_settings(project_id, setting_category)?
+        .get_project_settings(project.id, setting_category)?
         .ok_or_else(|| {
             error!("Settings not found");
             ApiError::NotFound
@@ -1075,32 +1141,38 @@ async fn get_project_settings(
 async fn update_project_settings(
     State(data): State<Arc<AppState>>,
     Extension(platform_user): Extension<PlatformUser>,
-    Path((org_id, project_id, category)): Path<(i32, i32, String)>,
+    Path((org_id, project_id, category)): Path<(Uuid, Uuid, String)>,
     Extension(update_request): Extension<UpdateProjectSettingsRequest>,
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<ProjectSettingResponse>>, ApiError> {
     debug!("Updating project settings");
 
+    // Get org and project by UUID
+    let org = data
+        .db
+        .get_org_by_uuid(org_id)
+        .map_err(|_| ApiError::NotFound)?;
+
+    let project = data.db.get_org_project_by_uuid(project_id).map_err(|_| {
+        error!("Project not found");
+        ApiError::NotFound
+    })?;
+
+    // Ensure project belongs to org
+    if project.org_id != org.id {
+        error!("Project does not belong to organization");
+        return Err(ApiError::NotFound);
+    }
+
     // Verify user has admin or owner role
     let membership = data
         .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org_id)
+        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
         .map_err(|_| ApiError::Unauthorized)?;
 
     let role: OrgRole = membership.role.into();
     if !matches!(role, OrgRole::Owner | OrgRole::Admin) {
         return Err(ApiError::Unauthorized);
-    }
-
-    // Get the project to verify it exists and belongs to the org
-    let project = data.db.get_org_project_by_id(project_id).map_err(|_| {
-        error!("Project not found");
-        ApiError::NotFound
-    })?;
-
-    if project.org_id != org_id {
-        error!("Project does not belong to organization");
-        return Err(ApiError::NotFound);
     }
 
     // Parse category
@@ -1115,7 +1187,7 @@ async fn update_project_settings(
     // Update settings
     let settings =
         data.db
-            .update_project_settings(project_id, setting_category, update_request.settings)?;
+            .update_project_settings(project.id, setting_category, update_request.settings)?;
 
     let response = ProjectSettingResponse {
         category: settings.category,
@@ -1130,32 +1202,38 @@ async fn update_project_settings(
 async fn get_email_settings(
     State(data): State<Arc<AppState>>,
     Extension(platform_user): Extension<PlatformUser>,
-    Path((org_id, project_id)): Path<(i32, i32)>,
+    Path((org_id, project_id)): Path<(Uuid, Uuid)>,
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<EmailSettings>>, ApiError> {
     debug!("Getting project email settings");
 
-    // Verify user has any role in the org
-    let _membership = data
+    // Get org and project by UUID
+    let org = data
         .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org_id)
-        .map_err(|_| ApiError::Unauthorized)?;
+        .get_org_by_uuid(org_id)
+        .map_err(|_| ApiError::NotFound)?;
 
-    // Get the project to verify it exists and belongs to the org
-    let project = data.db.get_org_project_by_id(project_id).map_err(|_| {
+    let project = data.db.get_org_project_by_uuid(project_id).map_err(|_| {
         error!("Project not found");
         ApiError::NotFound
     })?;
 
-    if project.org_id != org_id {
+    // Ensure project belongs to org
+    if project.org_id != org.id {
         error!("Project does not belong to organization");
         return Err(ApiError::NotFound);
     }
 
+    // Verify user has any role in the org
+    let _membership = data
+        .db
+        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
+        .map_err(|_| ApiError::Unauthorized)?;
+
     // Get email settings
     let settings = data
         .db
-        .get_project_email_settings(project_id)?
+        .get_project_email_settings(project.id)?
         .ok_or_else(|| {
             error!("Email settings not found");
             ApiError::NotFound
@@ -1167,7 +1245,7 @@ async fn get_email_settings(
 async fn update_email_settings(
     State(data): State<Arc<AppState>>,
     Extension(platform_user): Extension<PlatformUser>,
-    Path((org_id, project_id)): Path<(i32, i32)>,
+    Path((org_id, project_id)): Path<(Uuid, Uuid)>,
     Extension(update_request): Extension<UpdateEmailSettingsRequest>,
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<EmailSettings>>, ApiError> {
@@ -1179,26 +1257,32 @@ async fn update_email_settings(
         return Err(ApiError::BadRequest);
     }
 
+    // Get org and project by UUID
+    let org = data
+        .db
+        .get_org_by_uuid(org_id)
+        .map_err(|_| ApiError::NotFound)?;
+
+    let project = data.db.get_org_project_by_uuid(project_id).map_err(|_| {
+        error!("Project not found");
+        ApiError::NotFound
+    })?;
+
+    // Ensure project belongs to org
+    if project.org_id != org.id {
+        error!("Project does not belong to organization");
+        return Err(ApiError::NotFound);
+    }
+
     // Verify user has admin or owner role
     let membership = data
         .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org_id)
+        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
         .map_err(|_| ApiError::Unauthorized)?;
 
     let role: OrgRole = membership.role.into();
     if !matches!(role, OrgRole::Owner | OrgRole::Admin) {
         return Err(ApiError::Unauthorized);
-    }
-
-    // Get the project to verify it exists and belongs to the org
-    let project = data.db.get_org_project_by_id(project_id).map_err(|_| {
-        error!("Project not found");
-        ApiError::NotFound
-    })?;
-
-    if project.org_id != org_id {
-        error!("Project does not belong to organization");
-        return Err(ApiError::NotFound);
     }
 
     // Create email settings
@@ -1211,7 +1295,7 @@ async fn update_email_settings(
     // Update settings and get the result back
     let settings = data
         .db
-        .update_project_email_settings(project_id, email_settings)?;
+        .update_project_email_settings(project.id, email_settings)?;
 
     // Get the updated settings from the database to return
     let updated_settings = settings.get_email_settings().map_err(|e| {
@@ -1225,32 +1309,38 @@ async fn update_email_settings(
 async fn get_oauth_settings(
     State(data): State<Arc<AppState>>,
     Extension(platform_user): Extension<PlatformUser>,
-    Path((org_id, project_id)): Path<(i32, i32)>,
+    Path((org_id, project_id)): Path<(Uuid, Uuid)>,
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<OAuthSettings>>, ApiError> {
     debug!("Getting project OAuth settings");
 
-    // Verify user has any role in the org
-    let _membership = data
+    // Get org and project by UUID
+    let org = data
         .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org_id)
-        .map_err(|_| ApiError::Unauthorized)?;
+        .get_org_by_uuid(org_id)
+        .map_err(|_| ApiError::NotFound)?;
 
-    // Get the project to verify it exists and belongs to the org
-    let project = data.db.get_org_project_by_id(project_id).map_err(|_| {
+    let project = data.db.get_org_project_by_uuid(project_id).map_err(|_| {
         error!("Project not found");
         ApiError::NotFound
     })?;
 
-    if project.org_id != org_id {
+    // Ensure project belongs to org
+    if project.org_id != org.id {
         error!("Project does not belong to organization");
         return Err(ApiError::NotFound);
     }
 
+    // Verify user has any role in the org
+    let _membership = data
+        .db
+        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
+        .map_err(|_| ApiError::Unauthorized)?;
+
     // Get OAuth settings
     let settings = data
         .db
-        .get_project_oauth_settings(project_id)?
+        .get_project_oauth_settings(project.id)?
         .unwrap_or_default();
 
     encrypt_response(&data, &session_id, &settings).await
@@ -1259,7 +1349,7 @@ async fn get_oauth_settings(
 async fn update_oauth_settings(
     State(data): State<Arc<AppState>>,
     Extension(platform_user): Extension<PlatformUser>,
-    Path((org_id, project_id)): Path<(i32, i32)>,
+    Path((org_id, project_id)): Path<(Uuid, Uuid)>,
     Extension(update_request): Extension<UpdateOAuthSettingsRequest>,
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<OAuthSettings>>, ApiError> {
@@ -1271,26 +1361,32 @@ async fn update_oauth_settings(
         return Err(ApiError::BadRequest);
     }
 
+    // Get org and project by UUID
+    let org = data
+        .db
+        .get_org_by_uuid(org_id)
+        .map_err(|_| ApiError::NotFound)?;
+
+    let project = data.db.get_org_project_by_uuid(project_id).map_err(|_| {
+        error!("Project not found");
+        ApiError::NotFound
+    })?;
+
+    // Ensure project belongs to org
+    if project.org_id != org.id {
+        error!("Project does not belong to organization");
+        return Err(ApiError::NotFound);
+    }
+
     // Verify user has admin or owner role
     let membership = data
         .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org_id)
+        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
         .map_err(|_| ApiError::Unauthorized)?;
 
     let role: OrgRole = membership.role.into();
     if !matches!(role, OrgRole::Owner | OrgRole::Admin) {
         return Err(ApiError::Unauthorized);
-    }
-
-    // Get the project to verify it exists and belongs to the org
-    let project = data.db.get_org_project_by_id(project_id).map_err(|_| {
-        error!("Project not found");
-        ApiError::NotFound
-    })?;
-
-    if project.org_id != org_id {
-        error!("Project does not belong to organization");
-        return Err(ApiError::NotFound);
     }
 
     // Create OAuth settings
@@ -1304,7 +1400,7 @@ async fn update_oauth_settings(
     // Update settings
     let settings = data
         .db
-        .update_project_oauth_settings(project_id, oauth_settings)?;
+        .update_project_oauth_settings(project.id, oauth_settings)?;
 
     // Get the updated settings from the database to return
     let updated_settings = settings.get_oauth_settings().map_err(|e| {
