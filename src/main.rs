@@ -1078,7 +1078,10 @@ impl AppState {
         // Get the platform user
         let platform_user = match self.db.get_platform_user_by_email(email)? {
             Some(user) => user,
-            None => return Ok(None),
+            None => {
+                warn!("Could not find platform user by email: {email}");
+                return Ok(None);
+            }
         };
 
         // Check if this is an OAuth-only user (no password)
@@ -1087,19 +1090,24 @@ impl AppState {
             return Ok(None);
         }
 
-        // Hash the provided password
-        let password_hash = password_auth::generate_hash(password);
-
-        // Encrypt the hash with enclave key for comparison
-        let secret_key = SecretKey::from_slice(&self.enclave_key)
+        let secret_key = SecretKey::from_slice(&self.enclave_key.clone())
             .map_err(|e| Error::EncryptionError(e.to_string()))?;
-        let encrypted_password = encrypt_with_key(&secret_key, password_hash.as_bytes()).await;
 
-        // Compare the encrypted passwords
-        if platform_user.password_enc.as_ref() == Some(&encrypted_password) {
-            Ok(Some(platform_user))
-        } else {
-            Ok(None)
+        let decrypted_password_bytes =
+            decrypt_with_key(&secret_key, platform_user.password_enc.as_ref().unwrap())
+                .map_err(|e| Error::EncryptionError(e.to_string()))?;
+
+        let decrypted_password_hash = String::from_utf8(decrypted_password_bytes)
+            .map_err(|e| Error::EncryptionError(format!("Failed to decode UTF-8: {}", e)))?;
+
+        // Verifying the password is blocking and potentially slow, so we'll do so via
+        // `spawn_blocking`.
+        let res = task::spawn_blocking(move || verify_password(password, &decrypted_password_hash))
+            .await?;
+
+        match res {
+            Ok(_) => Ok(Some(platform_user)),
+            Err(_) => Ok(None),
         }
     }
 
