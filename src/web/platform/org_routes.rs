@@ -456,6 +456,24 @@ async fn create_project(
         return Err(ApiError::Unauthorized);
     }
 
+    // Check if a project with the same name already exists in this organization
+    if data
+        .db
+        .get_org_project_by_name_and_org(&create_request.name, org.id)
+        .map_err(|e| {
+            error!("Failed to check for existing project: {:?}", e);
+            ApiError::InternalServerError
+        })?
+        .is_some()
+    {
+        // Project with this name already exists
+        error!(
+            "Project with name '{}' already exists in this organization",
+            &create_request.name
+        );
+        return Err(ApiError::BadRequest);
+    }
+
     // Create the project
     let new_project = NewOrgProject::new(org.id, create_request.name).with_description(
         create_request
@@ -558,6 +576,24 @@ async fn update_project(
     // Update the project
     let mut updated_project = project;
     if let Some(name) = update_request.name {
+        // If name is changing, check if it conflicts with an existing project
+        if name != updated_project.name
+            && data
+                .db
+                .get_org_project_by_name_and_org(&name, org.id)
+                .map_err(|e| {
+                    error!("Failed to check for existing project: {:?}", e);
+                    ApiError::InternalServerError
+                })?
+                .is_some()
+        {
+            // Project with this name already exists
+            error!(
+                "Project with name '{}' already exists in this organization",
+                &name
+            );
+            return Err(ApiError::BadRequest);
+        }
         updated_project.name = name;
     }
     if let Some(description) = update_request.description {
