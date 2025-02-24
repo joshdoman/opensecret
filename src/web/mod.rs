@@ -14,6 +14,4 @@ pub use openai::router as openai_routes;
 pub use platform::org_routes as platform_org_routes;
 pub use protected_routes::router as protected_routes;
 
-// TODO remove allow oncce live
-#[allow(unused_imports)]
 pub use platform::login_routes as platform_login_routes;

@@ -8,6 +8,7 @@ use secp256k1::SecretKey;
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
+// TODO remove migration code now that this ran successfully
 pub async fn run_migrations(
     app_state: &Arc<AppState>,
     github_client_secret: Option<String>,

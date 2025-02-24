@@ -1,7 +1,4 @@
-// TODO remove allow oncce live
-#[allow(dead_code)]
 mod login_routes;
-#[allow(dead_code)]
 pub mod org_routes;
 mod validation;
 

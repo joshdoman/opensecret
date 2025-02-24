@@ -5,10 +5,12 @@ use crate::encrypt::generate_random;
 use crate::encrypt::{
     decrypt_with_key, decrypt_with_kms, encrypt_with_key, CustomRng, GenKeyResult,
 };
+use crate::jwt::validate_platform_jwt;
 use crate::login_routes::RegisterCredentials;
 use crate::models::password_reset::NewPasswordResetRequest;
 use crate::models::platform_users::PlatformUser;
 use crate::sqs::SqsEventPublisher;
+use crate::web::platform_login_routes;
 use crate::web::{health_routes, login_routes, oauth_routes, openai_routes, protected_routes};
 use crate::{attestation_routes::SessionState, web::platform_org_routes};
 use crate::{
@@ -1965,12 +1967,11 @@ async fn main() -> Result<(), Error> {
         )
         .merge(attestation_routes::router(app_state.clone()))
         .merge(oauth_routes(app_state.clone()))
-        // Temporarily disabled platform routes
-        // .merge(platform_login_routes(app_state.clone()))
-        // .merge(
-        //     platform_org_routes(app_state.clone())
-        //         .route_layer(from_fn_with_state(app_state.clone(), validate_platform_jwt)),
-        // )
+        .merge(platform_login_routes(app_state.clone()))
+        .merge(
+            platform_org_routes(app_state.clone())
+                .route_layer(from_fn_with_state(app_state.clone(), validate_platform_jwt)),
+        )
         .layer(cors);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
