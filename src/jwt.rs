@@ -279,7 +279,6 @@ pub async fn validate_jwt(
     next.run(req).await
 }
 
-#[allow(dead_code)]
 pub async fn validate_platform_jwt(
     State(data): State<Arc<AppState>>,
     mut req: Request<Body>,

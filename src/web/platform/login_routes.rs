@@ -2,7 +2,8 @@ use crate::{
     email::send_platform_verification_email,
     jwt::{NewToken, TokenType},
     models::{
-        platform_email_verification::NewPlatformEmailVerification, platform_users::NewPlatformUser,
+        org_memberships::OrgRole, platform_email_verification::NewPlatformEmailVerification,
+        platform_users::NewPlatformUser,
     },
     web::encryption_middleware::{decrypt_request, encrypt_response, EncryptedResponse},
     ApiError, AppState,
@@ -10,6 +11,7 @@ use crate::{
 use axum::{
     extract::State, middleware::from_fn_with_state, routing::post, Extension, Json, Router,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::spawn;
@@ -67,6 +69,28 @@ pub struct PlatformRefreshRequest {
 pub struct PlatformRefreshResponse {
     pub access_token: String,
     pub refresh_token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlatformOrg {
+    pub id: i32,
+    pub uuid: Uuid,
+    pub name: String,
+    pub role: OrgRole,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlatformProject {
+    pub id: i32,
+    pub uuid: Uuid,
+    pub client_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 pub fn router(app_state: Arc<AppState>) -> Router<()> {
@@ -250,7 +274,8 @@ pub async fn refresh_platform_token(
         return Err(ApiError::BadRequest);
     }
 
-    let claims = crate::jwt::validate_token(&refresh_request.refresh_token, &data, "refresh")?;
+    let claims =
+        crate::jwt::validate_token(&refresh_request.refresh_token, &data, "platform_refresh")?;
     let platform_user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::InvalidJwt)?;
 
     // Verify platform user still exists
