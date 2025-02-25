@@ -154,13 +154,15 @@ impl OrgMembership {
         conn.transaction(|conn| {
             // If changing from owner role, check if this is the last owner
             if membership.role == OrgRole::Owner.as_str() && new_role != OrgRole::Owner {
-                // Lock the memberships for this org to prevent concurrent modifications
-                let owner_count: i64 = org_memberships::table
+                // First, get all owner memberships with FOR UPDATE lock
+                let owner_memberships = org_memberships::table
                     .filter(org_memberships::org_id.eq(membership.org_id))
                     .filter(org_memberships::role.eq(OrgRole::Owner.as_str()))
                     .for_update() // This locks the rows
-                    .count()
-                    .get_result(conn)?;
+                    .load::<OrgMembership>(conn)?;
+
+                // Then count them
+                let owner_count = owner_memberships.len() as i64;
 
                 if owner_count <= 1 {
                     return Err(OrgMembershipError::DatabaseError(
@@ -191,13 +193,15 @@ impl OrgMembership {
         conn.transaction(|conn| {
             // If deleting an owner, check if this is the last owner
             if membership.role == OrgRole::Owner.as_str() {
-                // Lock the memberships for this org to prevent concurrent modifications
-                let owner_count: i64 = org_memberships::table
+                // First, get all owner memberships with FOR UPDATE lock
+                let owner_memberships = org_memberships::table
                     .filter(org_memberships::org_id.eq(membership.org_id))
                     .filter(org_memberships::role.eq(OrgRole::Owner.as_str()))
                     .for_update() // This locks the rows
-                    .count()
-                    .get_result(conn)?;
+                    .load::<OrgMembership>(conn)?;
+
+                // Then count them
+                let owner_count = owner_memberships.len() as i64;
 
                 if owner_count <= 1 {
                     return Err(OrgMembershipError::DatabaseError(
