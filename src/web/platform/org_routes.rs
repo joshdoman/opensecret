@@ -4,7 +4,6 @@ use crate::models::org_project_secrets::NewOrgProjectSecret;
 use crate::models::project_settings::EmailSettings;
 use crate::models::project_settings::OAuthProviderSettings;
 use crate::models::project_settings::OAuthSettings;
-use crate::models::project_settings::SettingCategory;
 use crate::DBError;
 use crate::{
     email::send_platform_invite_email,
@@ -137,26 +136,23 @@ pub struct SecretResponse {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Serialize)]
-pub struct ProjectSettingResponse {
-    pub category: String,
-    pub settings: serde_json::Value,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Deserialize, Clone, Validate)]
-pub struct UpdateProjectSettingsRequest {
-    pub settings: serde_json::Value,
-}
-
 #[derive(Deserialize, Clone, Validate)]
 pub struct UpdateEmailSettingsRequest {
     #[validate(length(min = 1, max = 255))]
+    #[validate(custom(function = "validate_email_provider"))]
     pub provider: String,
     #[validate(email)]
     pub send_from: String,
     pub email_verification_url: String,
+}
+
+fn validate_email_provider(provider: &str) -> Result<(), validator::ValidationError> {
+    if provider != "resend" {
+        let mut error = validator::ValidationError::new("invalid_email_provider");
+        error.message = Some("Only 'resend' is supported as an email provider".into());
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[derive(Deserialize, Clone, Validate)]
@@ -247,19 +243,7 @@ pub fn router(app_state: Arc<AppState>) -> Router {
             delete(delete_secret)
                 .layer(from_fn_with_state(app_state.clone(), decrypt_request::<()>)),
         )
-        // Project settings routes
-        .route(
-            "/platform/orgs/:org_id/projects/:project_id/settings/:category",
-            get(get_project_settings)
-                .layer(from_fn_with_state(app_state.clone(), decrypt_request::<()>)),
-        )
-        .route(
-            "/platform/orgs/:org_id/projects/:project_id/settings/:category",
-            put(update_project_settings).layer(from_fn_with_state(
-                app_state.clone(),
-                decrypt_request::<UpdateProjectSettingsRequest>,
-            )),
-        )
+        // Project settings routes - keep only specialized endpoints
         .route(
             "/platform/orgs/:org_id/projects/:project_id/settings/email",
             get(get_email_settings)
@@ -1115,126 +1099,6 @@ async fn delete_secret(
     encrypt_response(&data, &session_id, &response).await
 }
 
-async fn get_project_settings(
-    State(data): State<Arc<AppState>>,
-    Extension(platform_user): Extension<PlatformUser>,
-    Path((org_id, project_id, category)): Path<(Uuid, Uuid, String)>,
-    Extension(session_id): Extension<Uuid>,
-) -> Result<Json<EncryptedResponse<ProjectSettingResponse>>, ApiError> {
-    debug!("Getting project settings");
-
-    // Get org and project by UUID
-    let org = data
-        .db
-        .get_org_by_uuid(org_id)
-        .map_err(|_| ApiError::NotFound)?;
-
-    let project = data.db.get_org_project_by_uuid(project_id).map_err(|_| {
-        error!("Project not found");
-        ApiError::NotFound
-    })?;
-
-    // Ensure project belongs to org
-    if project.org_id != org.id {
-        error!("Project does not belong to organization");
-        return Err(ApiError::NotFound);
-    }
-
-    // Verify user has any role in the org
-    let _membership = data
-        .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
-        .map_err(|_| ApiError::Unauthorized)?;
-
-    // Parse category
-    let setting_category = match category.as_str() {
-        "email" => SettingCategory::Email,
-        _ => {
-            error!("Invalid settings category: {}", category);
-            return Err(ApiError::BadRequest);
-        }
-    };
-
-    // Get settings
-    let settings = data
-        .db
-        .get_project_settings(project.id, setting_category)?
-        .ok_or_else(|| {
-            error!("Settings not found");
-            ApiError::NotFound
-        })?;
-
-    let response = ProjectSettingResponse {
-        category: settings.category,
-        settings: settings.settings,
-        created_at: settings.created_at,
-        updated_at: settings.updated_at,
-    };
-
-    encrypt_response(&data, &session_id, &response).await
-}
-
-async fn update_project_settings(
-    State(data): State<Arc<AppState>>,
-    Extension(platform_user): Extension<PlatformUser>,
-    Path((org_id, project_id, category)): Path<(Uuid, Uuid, String)>,
-    Extension(update_request): Extension<UpdateProjectSettingsRequest>,
-    Extension(session_id): Extension<Uuid>,
-) -> Result<Json<EncryptedResponse<ProjectSettingResponse>>, ApiError> {
-    debug!("Updating project settings");
-
-    // Get org and project by UUID
-    let org = data
-        .db
-        .get_org_by_uuid(org_id)
-        .map_err(|_| ApiError::NotFound)?;
-
-    let project = data.db.get_org_project_by_uuid(project_id).map_err(|_| {
-        error!("Project not found");
-        ApiError::NotFound
-    })?;
-
-    // Ensure project belongs to org
-    if project.org_id != org.id {
-        error!("Project does not belong to organization");
-        return Err(ApiError::NotFound);
-    }
-
-    // Verify user has admin or owner role
-    let membership = data
-        .db
-        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
-        .map_err(|_| ApiError::Unauthorized)?;
-
-    let role: OrgRole = membership.role.into();
-    if !matches!(role, OrgRole::Owner | OrgRole::Admin) {
-        return Err(ApiError::Unauthorized);
-    }
-
-    // Parse category
-    let setting_category = match category.as_str() {
-        "email" => SettingCategory::Email,
-        _ => {
-            error!("Invalid settings category: {}", category);
-            return Err(ApiError::BadRequest);
-        }
-    };
-
-    // Update settings
-    let settings =
-        data.db
-            .update_project_settings(project.id, setting_category, update_request.settings)?;
-
-    let response = ProjectSettingResponse {
-        category: settings.category,
-        settings: settings.settings,
-        created_at: settings.created_at,
-        updated_at: settings.updated_at,
-    };
-
-    encrypt_response(&data, &session_id, &response).await
-}
-
 async fn get_email_settings(
     State(data): State<Arc<AppState>>,
     Extension(platform_user): Extension<PlatformUser>,
@@ -1391,9 +1255,20 @@ async fn update_oauth_settings(
 ) -> Result<Json<EncryptedResponse<OAuthSettings>>, ApiError> {
     debug!("Updating project OAuth settings");
 
-    // Validate request
+    // Validate request using validator
     if let Err(errors) = update_request.validate() {
         error!("Validation error: {:?}", errors);
+        return Err(ApiError::BadRequest);
+    }
+
+    // Additional validation for the relationship between enabled flags and settings
+    if update_request.google_oauth_enabled && update_request.google_oauth_settings.is_none() {
+        error!("Google OAuth settings must be provided when Google OAuth is enabled");
+        return Err(ApiError::BadRequest);
+    }
+
+    if update_request.github_oauth_enabled && update_request.github_oauth_settings.is_none() {
+        error!("GitHub OAuth settings must be provided when GitHub OAuth is enabled");
         return Err(ApiError::BadRequest);
     }
 
