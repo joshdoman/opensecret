@@ -241,6 +241,10 @@ pub fn router(app_state: Arc<AppState>) -> Router {
         )
         .route(
             "/platform/orgs/:org_id/projects/:project_id",
+            get(get_project).layer(from_fn_with_state(app_state.clone(), decrypt_request::<()>)),
+        )
+        .route(
+            "/platform/orgs/:org_id/projects/:project_id",
             delete(delete_project)
                 .layer(from_fn_with_state(app_state.clone(), decrypt_request::<()>)),
         )
@@ -623,6 +627,50 @@ async fn update_project(
         description: updated_project.description,
         status: updated_project.status,
         created_at: updated_project.created_at,
+    };
+
+    encrypt_response(&data, &session_id, &response).await
+}
+
+async fn get_project(
+    State(data): State<Arc<AppState>>,
+    Extension(platform_user): Extension<PlatformUser>,
+    Path((org_id, project_id)): Path<(Uuid, Uuid)>,
+    Extension(session_id): Extension<Uuid>,
+) -> Result<Json<EncryptedResponse<ProjectResponse>>, ApiError> {
+    debug!("Getting project");
+
+    // Get org and project by UUID
+    let org = data
+        .db
+        .get_org_by_uuid(org_id)
+        .map_err(|_| ApiError::NotFound)?;
+
+    // Verify user has any role in the org (read access is allowed for all roles)
+    let _membership = data
+        .db
+        .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
+        .map_err(|_| ApiError::Unauthorized)?;
+
+    let project = data
+        .db
+        .get_org_project_by_uuid(project_id)
+        .map_err(|_| ApiError::NotFound)?;
+
+    // Ensure project belongs to org
+    if project.org_id != org.id {
+        error!("Project does not belong to organization");
+        return Err(ApiError::NotFound);
+    }
+
+    // Return the project response
+    let response = ProjectResponse {
+        id: project.uuid,
+        client_id: project.client_id,
+        name: project.name,
+        description: project.description,
+        status: project.status,
+        created_at: project.created_at,
     };
 
     encrypt_response(&data, &session_id, &response).await
