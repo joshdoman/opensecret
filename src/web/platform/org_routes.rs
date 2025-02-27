@@ -116,6 +116,7 @@ pub struct ProjectResponse {
     pub name: String,
     pub description: Option<String>,
     pub status: String,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Serialize)]
@@ -497,6 +498,7 @@ async fn create_project(
         name: project.name,
         description: project.description,
         status: project.status,
+        created_at: project.created_at,
     };
 
     encrypt_response(&data, &session_id, &response).await
@@ -536,6 +538,7 @@ async fn list_projects(
             name: p.name,
             description: p.description,
             status: p.status,
+            created_at: p.created_at,
         })
         .collect();
 
@@ -619,6 +622,7 @@ async fn update_project(
         name: updated_project.name,
         description: updated_project.description,
         status: updated_project.status,
+        created_at: updated_project.created_at,
     };
 
     encrypt_response(&data, &session_id, &response).await
