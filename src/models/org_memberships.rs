@@ -1,4 +1,4 @@
-use crate::models::schema::org_memberships;
+use crate::models::schema::{org_memberships, platform_users};
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,19 @@ pub struct OrgMembership {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Queryable)]
+pub struct OrgMembershipWithUser {
+    // OrgMembership fields
+    pub id: i32,
+    pub platform_user_id: Uuid,
+    pub org_id: i32,
+    pub role: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    // PlatformUser fields
+    pub user_name: Option<String>,
+}
+
 // Custom serialization for role field
 mod role_string {
     use super::OrgRole;
@@ -101,6 +114,31 @@ impl OrgMembership {
             .map_err(OrgMembershipError::DatabaseError)
     }
 
+    pub fn get_by_platform_user_and_org_with_user(
+        conn: &mut PgConnection,
+        lookup_platform_user_id: Uuid,
+        lookup_org_id: i32,
+    ) -> Result<OrgMembershipWithUser, OrgMembershipError> {
+        org_memberships::table
+            .inner_join(
+                platform_users::table
+                    .on(platform_users::uuid.eq(org_memberships::platform_user_id)),
+            )
+            .filter(org_memberships::platform_user_id.eq(lookup_platform_user_id))
+            .filter(org_memberships::org_id.eq(lookup_org_id))
+            .select((
+                org_memberships::id,
+                org_memberships::platform_user_id,
+                org_memberships::org_id,
+                org_memberships::role,
+                org_memberships::created_at,
+                org_memberships::updated_at,
+                platform_users::name,
+            ))
+            .first::<OrgMembershipWithUser>(conn)
+            .map_err(OrgMembershipError::DatabaseError)
+    }
+
     pub fn get_all_for_platform_user(
         conn: &mut PgConnection,
         lookup_platform_user_id: Uuid,
@@ -118,6 +156,30 @@ impl OrgMembership {
         org_memberships::table
             .filter(org_memberships::org_id.eq(lookup_org_id))
             .load::<OrgMembership>(conn)
+            .map_err(OrgMembershipError::DatabaseError)
+    }
+
+    pub fn get_all_with_users_for_org(
+        conn: &mut PgConnection,
+        lookup_org_id: i32,
+    ) -> Result<Vec<OrgMembershipWithUser>, OrgMembershipError> {
+        // Join org_memberships with platform_users to get the names in a single query
+        org_memberships::table
+            .inner_join(
+                platform_users::table
+                    .on(platform_users::uuid.eq(org_memberships::platform_user_id)),
+            )
+            .filter(org_memberships::org_id.eq(lookup_org_id))
+            .select((
+                org_memberships::id,
+                org_memberships::platform_user_id,
+                org_memberships::org_id,
+                org_memberships::role,
+                org_memberships::created_at,
+                org_memberships::updated_at,
+                platform_users::name,
+            ))
+            .load::<OrgMembershipWithUser>(conn)
             .map_err(OrgMembershipError::DatabaseError)
     }
 

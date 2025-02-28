@@ -123,6 +123,7 @@ pub struct ProjectResponse {
 pub struct MembershipResponse {
     pub user_id: Uuid,
     pub role: String,
+    pub name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -801,20 +802,22 @@ async fn list_memberships(
         .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
         .map_err(|_| ApiError::Unauthorized)?;
 
-    // Get all memberships
-    let memberships = data
+    // Get all memberships with user information in a single query
+    let memberships_with_users = data
         .db
-        .get_all_org_memberships_for_org(org.id)
+        .get_all_org_memberships_with_users_for_org(org.id)
         .map_err(|e| {
-            error!("Failed to get memberships: {:?}", e);
+            error!("Failed to get memberships with users: {:?}", e);
             ApiError::InternalServerError
         })?;
 
-    let response = memberships
+    // Create response directly from the joined results
+    let response = memberships_with_users
         .into_iter()
         .map(|m| MembershipResponse {
             user_id: m.platform_user_id,
             role: m.role,
+            name: m.user_name,
         })
         .collect();
 
@@ -868,9 +871,19 @@ async fn update_membership(
             }
         })?;
 
+    // Get the membership with user info in a single query
+    let membership_with_user = data
+        .db
+        .get_org_membership_by_platform_user_and_org_with_user(user_id, org.id)
+        .map_err(|e| {
+            error!("Failed to get membership with user: {:?}", e);
+            ApiError::InternalServerError
+        })?;
+
     let response = MembershipResponse {
-        user_id: target_membership.platform_user_id,
-        role: target_membership.role,
+        user_id: membership_with_user.platform_user_id,
+        role: membership_with_user.role,
+        name: membership_with_user.user_name,
     };
 
     encrypt_response(&data, &session_id, &response).await

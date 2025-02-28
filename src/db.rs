@@ -4,7 +4,7 @@ use crate::models::oauth::{
     NewOAuthProvider, NewUserOAuthConnection, OAuthError, OAuthProvider, UserOAuthConnection,
 };
 use crate::models::org_memberships::NewOrgMembership;
-use crate::models::org_memberships::{OrgMembership, OrgMembershipError};
+use crate::models::org_memberships::{OrgMembership, OrgMembershipError, OrgMembershipWithUser};
 use crate::models::org_project_secrets::{
     NewOrgProjectSecret, OrgProjectSecret, OrgProjectSecretError,
 };
@@ -258,11 +258,21 @@ pub trait DBConnection {
         platform_user_id: Uuid,
         org_id: i32,
     ) -> Result<OrgMembership, DBError>;
+
+    fn get_org_membership_by_platform_user_and_org_with_user(
+        &self,
+        platform_user_id: Uuid,
+        org_id: i32,
+    ) -> Result<OrgMembershipWithUser, DBError>;
     fn get_all_org_memberships_for_platform_user(
         &self,
         platform_user_id: Uuid,
     ) -> Result<Vec<OrgMembership>, DBError>;
     fn get_all_org_memberships_for_org(&self, org_id: i32) -> Result<Vec<OrgMembership>, DBError>;
+    fn get_all_org_memberships_with_users_for_org(
+        &self,
+        org_id: i32,
+    ) -> Result<Vec<OrgMembershipWithUser>, DBError>;
     fn update_org_membership(&self, membership: &OrgMembership) -> Result<(), DBError>;
     fn delete_org_membership(&self, membership: &OrgMembership) -> Result<(), DBError>;
     fn update_membership_role(
@@ -1068,6 +1078,25 @@ impl DBConnection for PostgresConnection {
         result
     }
 
+    fn get_org_membership_by_platform_user_and_org_with_user(
+        &self,
+        platform_user_id: Uuid,
+        org_id: i32,
+    ) -> Result<OrgMembershipWithUser, DBError> {
+        debug!("Getting org membership with user info by platform user and org");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result =
+            OrgMembership::get_by_platform_user_and_org_with_user(conn, platform_user_id, org_id)
+                .map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!(
+                "Failed to get org membership with user info by platform user and org: {:?}",
+                e
+            );
+        }
+        result
+    }
+
     fn get_all_org_memberships_for_platform_user(
         &self,
         platform_user_id: Uuid,
@@ -1091,6 +1120,22 @@ impl DBConnection for PostgresConnection {
         let result = OrgMembership::get_all_for_org(conn, org_id).map_err(DBError::from);
         if let Err(ref e) = result {
             error!("Failed to get all org memberships for org: {:?}", e);
+        }
+        result
+    }
+
+    fn get_all_org_memberships_with_users_for_org(
+        &self,
+        org_id: i32,
+    ) -> Result<Vec<OrgMembershipWithUser>, DBError> {
+        debug!("Getting all org memberships with users for org");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = OrgMembership::get_all_with_users_for_org(conn, org_id).map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!(
+                "Failed to get all org memberships with users for org: {:?}",
+                e
+            );
         }
         result
     }
