@@ -25,12 +25,7 @@ use crate::{
 };
 use crate::{encrypt::create_new_encryption_key, jwt::validate_jwt};
 use aws_credentials::{AwsCredentialManager, AwsCredentials};
-use axum::{
-    http::{Method, StatusCode},
-    middleware::from_fn_with_state,
-    response::IntoResponse,
-    Json,
-};
+use axum::{http::StatusCode, middleware::from_fn_with_state, response::IntoResponse, Json};
 use base64::engine::general_purpose;
 use base64::Engine as _;
 use chacha20poly1305::aead::Aead;
@@ -1958,8 +1953,8 @@ async fn main() -> Result<(), Error> {
     .await?;
 
     let cors = CorsLayer::new()
-        // allow `GET` and `POST` when accessing the resource
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+        // allow all method types
+        .allow_methods(Any)
         // allow all headers
         .allow_headers(Any)
         // allow requests from any origin
