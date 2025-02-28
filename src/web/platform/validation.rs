@@ -11,7 +11,7 @@ lazy_static! {
     // - Underscore and dot for technical names (_.)
     // - Spaces (will be trimmed)
     static ref ALPHANUMERIC_WITH_SYMBOLS: Regex = Regex::new(r"^[a-zA-Z0-9\s&@!()\-+._]+$").unwrap();
-    static ref ALPHANUMERIC_ONLY: Regex = Regex::new(r"^[a-zA-Z0-9]+$").unwrap();
+    static ref ALPHANUMERIC_ONLY: Regex = Regex::new(r"^[a-zA-Z0-9_]+$").unwrap();
 }
 
 pub fn validate_alphanumeric_with_symbols(value: &str) -> Result<(), ValidationError> {
@@ -128,7 +128,15 @@ mod tests {
     #[test]
     fn test_alphanumeric_only() {
         // Valid cases
-        let valid_strings = vec!["abc123", "ABC123", "123456", "abcABC123"];
+        let valid_strings = vec![
+            "abc123",
+            "ABC123",
+            "123456",
+            "abcABC123",
+            "abc_123",
+            "ABC_DEF",
+            "RESEND_API_KEY",
+        ];
 
         for s in valid_strings {
             assert!(
@@ -140,7 +148,7 @@ mod tests {
 
         // Invalid cases
         let invalid_strings = vec![
-            "abc 123", "abc-123", "abc_123", "abc.123", "abc@123", "", " ", "abc!123",
+            "abc 123", "abc-123", "abc.123", "abc@123", "", " ", "abc!123",
         ];
 
         for s in invalid_strings {
