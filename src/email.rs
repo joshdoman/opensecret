@@ -461,6 +461,7 @@ pub async fn send_platform_invite_email(
     to_email: String,
     organization_name: String,
     invite_code: Uuid,
+    org_id: Uuid,
 ) -> Result<(), EmailError> {
     tracing::debug!("Entering send_invite_email");
     if resend_api_key.is_none() {
@@ -482,7 +483,7 @@ pub async fn send_platform_invite_email(
         AppMode::Custom(_) => "https://preview.opensecret.cloud",
     };
 
-    let invite_url = format!("{}/join/{}", base_url, invite_code);
+    let invite_url = format!("invite/{}/orgs/{}/code/{}", base_url, org_id, invite_code);
 
     let html_content = format!(
         r#"
