@@ -338,4 +338,3 @@ async fn accept_invite(
 
     encrypt_response(&data, &session_id, &response).await
 }
-

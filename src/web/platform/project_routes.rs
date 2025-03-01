@@ -808,4 +808,3 @@ async fn update_oauth_settings(
 
     encrypt_response(&data, &session_id, &updated_settings).await
 }
-

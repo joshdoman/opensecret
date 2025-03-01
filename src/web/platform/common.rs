@@ -194,4 +194,3 @@ pub fn validate_oauth_provider_settings(
     }
     Ok(())
 }
-

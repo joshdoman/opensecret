@@ -91,4 +91,3 @@ async fn get_platform_user(
     debug!("Exiting get_platform_user function");
     encrypt_response(&data, &session_id, &response).await
 }
-
