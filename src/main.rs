@@ -12,13 +12,13 @@ use crate::models::platform_users::PlatformUser;
 use crate::sqs::SqsEventPublisher;
 use crate::web::platform_login_routes;
 use crate::web::{health_routes, login_routes, oauth_routes, openai_routes, protected_routes};
-use crate::{attestation_routes::SessionState, web::platform_org_routes};
+use crate::{attestation_routes::SessionState, web::platform_routes};
 use crate::{
     aws_credentials::AwsCredentialError,
     models::enclave_secrets::NewEnclaveSecret,
     private_key::{decrypt_user_seed_to_key, generate_twelve_word_seed},
 };
-use crate::{billing::BillingClient, web::platform_org_routes::PROJECT_RESEND_API_KEY};
+use crate::{billing::BillingClient, web::platform::common::PROJECT_RESEND_API_KEY};
 use crate::{
     db::{setup_db, DBConnection, DBError},
     models::users::{NewUser, User},
@@ -1972,7 +1972,7 @@ async fn main() -> Result<(), Error> {
         .merge(oauth_routes(app_state.clone()))
         .merge(platform_login_routes(app_state.clone()))
         .merge(
-            platform_org_routes(app_state.clone())
+            platform_routes(app_state.clone())
                 .route_layer(from_fn_with_state(app_state.clone(), validate_platform_jwt)),
         )
         .layer(cors);

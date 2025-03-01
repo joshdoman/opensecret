@@ -483,7 +483,7 @@ pub async fn send_platform_invite_email(
         AppMode::Custom(_) => "https://preview.opensecret.cloud",
     };
 
-    let invite_url = format!("invite/{}/orgs/{}/code/{}", base_url, org_id, invite_code);
+    let invite_url = format!("{}/invite/orgs/{}/code/{}", base_url, org_id, invite_code);
 
     let html_content = format!(
         r#"

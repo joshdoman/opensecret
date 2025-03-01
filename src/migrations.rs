@@ -1,6 +1,6 @@
 use crate::models::org_project_secrets::NewOrgProjectSecret;
 use crate::models::project_settings::{EmailSettings, OAuthProviderSettings, OAuthSettings};
-use crate::web::platform::org_routes::{
+use crate::web::platform::{
     PROJECT_GITHUB_OAUTH_SECRET, PROJECT_GOOGLE_OAUTH_SECRET, PROJECT_RESEND_API_KEY,
 };
 use crate::{AppMode, AppState, Error};
