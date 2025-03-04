@@ -9,10 +9,14 @@ use crate::{
     ApiError, AppState,
 };
 use axum::{
-    extract::State, middleware::from_fn_with_state, routing::post, Extension, Json, Router,
+    extract::{Path, State},
+    middleware::from_fn_with_state,
+    routing::{get, post},
+    Extension, Json, Router,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::sync::Arc;
 use tokio::spawn;
 use tracing::{debug, error};
@@ -115,6 +119,11 @@ pub fn router(app_state: Arc<AppState>) -> Router<()> {
                 app_state.clone(),
                 decrypt_request::<PlatformRefreshRequest>,
             )),
+        )
+        .route(
+            "/platform/verify-email/:code",
+            get(verify_platform_email)
+                .layer(from_fn_with_state(app_state.clone(), decrypt_request::<()>)),
         )
         .with_state(app_state)
 }
@@ -294,5 +303,54 @@ pub async fn refresh_platform_token(
 
     let result = encrypt_response(&data, &session_id, &response).await;
     debug!("Exiting refresh_platform_token function");
+    result
+}
+
+pub async fn verify_platform_email(
+    State(data): State<Arc<AppState>>,
+    Path(code): Path<Uuid>,
+    Extension(session_id): Extension<Uuid>,
+) -> Result<Json<EncryptedResponse<serde_json::Value>>, ApiError> {
+    debug!("Entering verify_platform_email function");
+
+    // Retrieve the verification record using the code
+    let verification = match data.db.get_platform_email_verification_by_code(code) {
+        Ok(verification) => verification,
+        Err(crate::db::DBError::PlatformEmailVerificationNotFound) => {
+            error!("Platform email verification code not found: {}", code);
+            return Err(ApiError::BadRequest);
+        }
+        Err(e) => {
+            error!("Error retrieving platform email verification: {:?}", e);
+            return Err(ApiError::InternalServerError);
+        }
+    };
+
+    // Check if verification is already marked as verified
+    if verification.is_verified {
+        let response = json!({
+            "message": "Email already verified"
+        });
+        return encrypt_response(&data, &session_id, &response).await;
+    }
+
+    // Check if verification is expired
+    if verification.expires_at < Utc::now() {
+        return Err(ApiError::BadRequest);
+    }
+
+    // Mark the verification as verified
+    let mut verification_to_update = verification.clone();
+    if let Err(e) = verification_to_update.verify(&mut data.db.get_pool().get().unwrap()) {
+        error!("Error verifying platform email: {:?}", e);
+        return Err(ApiError::InternalServerError);
+    }
+
+    let response = json!({
+        "message": "Email verified successfully"
+    });
+
+    let result = encrypt_response(&data, &session_id, &response).await;
+    debug!("Exiting verify_platform_email function");
     result
 }

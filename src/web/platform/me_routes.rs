@@ -1,10 +1,19 @@
 use crate::{
+    email::send_platform_verification_email,
+    models::platform_email_verification::NewPlatformEmailVerification,
     models::platform_users::PlatformUser,
     web::encryption_middleware::{decrypt_request, encrypt_response, EncryptedResponse},
     ApiError, AppState,
 };
-use axum::{extract::State, middleware::from_fn_with_state, routing::get, Extension, Json, Router};
+use axum::{
+    extract::State,
+    middleware::from_fn_with_state,
+    routing::{get, post},
+    Extension, Json, Router,
+};
+use serde_json::json;
 use std::sync::Arc;
+use tokio::spawn;
 use tracing::{debug, error};
 use uuid::Uuid;
 
@@ -15,6 +24,11 @@ pub fn router(app_state: Arc<AppState>) -> Router {
         .route(
             "/platform/me",
             get(get_platform_user)
+                .layer(from_fn_with_state(app_state.clone(), decrypt_request::<()>)),
+        )
+        .route(
+            "/platform/request_verification",
+            post(request_platform_verification)
                 .layer(from_fn_with_state(app_state.clone(), decrypt_request::<()>)),
         )
         .with_state(app_state)
@@ -89,5 +103,70 @@ async fn get_platform_user(
     };
 
     debug!("Exiting get_platform_user function");
+    encrypt_response(&data, &session_id, &response).await
+}
+
+async fn request_platform_verification(
+    State(data): State<Arc<AppState>>,
+    Extension(platform_user): Extension<PlatformUser>,
+    Extension(session_id): Extension<Uuid>,
+) -> Result<Json<EncryptedResponse<serde_json::Value>>, ApiError> {
+    debug!("Entering request_platform_verification function");
+
+    // Check if the user is already verified
+    match data
+        .db
+        .get_platform_email_verification_by_platform_user_id(platform_user.uuid)
+    {
+        Ok(verification) => {
+            if verification.is_verified {
+                let response = json!({ "error": "User is already verified" });
+                return encrypt_response(&data, &session_id, &response).await;
+            }
+            // Delete the old verification
+            if let Err(e) = verification.delete(&mut data.db.get_pool().get().unwrap()) {
+                error!("Error deleting old platform verification: {:?}", e);
+                return Err(ApiError::InternalServerError);
+            }
+        }
+        Err(crate::db::DBError::PlatformEmailVerificationNotFound) => {
+            // This is fine, we'll create a new verification
+        }
+        Err(e) => {
+            error!("Error checking platform email verification: {:?}", e);
+            return Err(ApiError::InternalServerError);
+        }
+    }
+
+    // Create a new verification entry
+    let new_verification = NewPlatformEmailVerification::new(platform_user.uuid, 24, false); // 24 hours expiration
+    let verification = match data.db.create_platform_email_verification(new_verification) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Error creating platform email verification: {:?}", e);
+            return Err(ApiError::InternalServerError);
+        }
+    };
+
+    // Send the new verification email
+    let email = platform_user.email.clone();
+    let verification_code = verification.verification_code;
+    let app_state = data.clone();
+
+    spawn(async move {
+        if let Err(e) = send_platform_verification_email(
+            &app_state,
+            app_state.resend_api_key.clone(),
+            email,
+            verification_code,
+        )
+        .await
+        {
+            error!("Could not send platform verification email: {}", e);
+        }
+    });
+
+    let response = json!({ "message": "New verification code sent successfully" });
+    debug!("Exiting request_platform_verification function");
     encrypt_response(&data, &session_id, &response).await
 }
