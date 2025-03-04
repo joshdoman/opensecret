@@ -399,9 +399,9 @@ pub async fn send_platform_verification_email(
 
     let base_url = match app_state.app_mode {
         AppMode::Local => "http://localhost:5173",
-        AppMode::Dev => "https://dev.secretgpt.ai",
-        AppMode::Preview => "https://opensecret.cloud",
-        AppMode::Prod => "https://trymaple.ai",
+        AppMode::Dev => "https://dev.opensecret.cloud",
+        AppMode::Preview => "https://preview.opensecret.cloud",
+        AppMode::Prod => "https://app.opensecret.cloud",
         AppMode::Custom(_) => "https://preview.opensecret.cloud",
     };
 
@@ -477,9 +477,9 @@ pub async fn send_platform_invite_email(
 
     let base_url = match app_mode {
         AppMode::Local => "http://localhost:5173",
-        AppMode::Dev => "https://dev.secretgpt.ai",
-        AppMode::Preview => "https://opensecret.cloud",
-        AppMode::Prod => "https://trymaple.ai",
+        AppMode::Dev => "https://dev.opensecret.cloud",
+        AppMode::Preview => "https://preview.opensecret.cloud",
+        AppMode::Prod => "https://app.opensecret.cloud",
         AppMode::Custom(_) => "https://preview.opensecret.cloud",
     };
 
@@ -534,12 +534,11 @@ pub async fn send_platform_invite_email(
 }
 
 fn from_opensecret_email(app_mode: AppMode) -> String {
-    // TODO change these to opensecret domains and only use for platform
     match app_mode {
-        AppMode::Local => "local@email.trymaple.ai".to_string(),
-        AppMode::Dev => "dev@email.trymaple.ai".to_string(),
-        AppMode::Preview => "preview@email.trymaple.ai".to_string(),
-        AppMode::Prod => "hello@email.trymaple.ai".to_string(),
-        AppMode::Custom(_) => "preview@email.trymaple.ai".to_string(),
+        AppMode::Local => "local@email.opensecret.cloud".to_string(),
+        AppMode::Dev => "dev@email.opensecret.cloud".to_string(),
+        AppMode::Preview => "preview@email.opensecret.cloud".to_string(),
+        AppMode::Prod => "hello@email.opensecret.cloud".to_string(),
+        AppMode::Custom(_) => "preview@email.opensecret.cloud".to_string(),
     }
 }
