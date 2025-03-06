@@ -121,7 +121,7 @@ diesel::table! {
 diesel::table! {
     platform_password_reset_requests (id) {
         id -> Int4,
-        user_id -> Uuid,
+        platform_user_id -> Uuid,
         #[max_length = 255]
         hashed_secret -> Varchar,
         encrypted_code -> Bytea,

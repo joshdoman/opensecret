@@ -13,6 +13,8 @@ pub enum PlatformEmailVerificationError {
     Expired,
     #[error("Verification already used")]
     AlreadyVerified,
+    #[error("Invalid expiration duration: {0}")]
+    InvalidExpirationDuration(String),
 }
 
 #[derive(Queryable, Identifiable, AsChangeset, Serialize, Deserialize, Clone, Debug)]
@@ -111,14 +113,31 @@ pub struct NewPlatformEmailVerification {
 }
 
 impl NewPlatformEmailVerification {
-    pub fn new(platform_user_id: Uuid, expire_hours: i64, is_verified: bool) -> Self {
+    pub fn new(
+        platform_user_id: Uuid,
+        expire_hours: i64,
+        is_verified: bool,
+    ) -> Result<Self, PlatformEmailVerificationError> {
+        if expire_hours <= 0 {
+            return Err(PlatformEmailVerificationError::InvalidExpirationDuration(
+                "expire_hours must be positive".to_string(),
+            ));
+        }
+
+        // Prevent unreasonably large durations (1 year max)
+        if expire_hours > 8760 {
+            return Err(PlatformEmailVerificationError::InvalidExpirationDuration(
+                "expire_hours must be less than or equal to 8760 (1 year)".to_string(),
+            ));
+        }
+
         let expires_at = Utc::now() + chrono::Duration::hours(expire_hours);
-        NewPlatformEmailVerification {
+        Ok(NewPlatformEmailVerification {
             platform_user_id,
             verification_code: Uuid::new_v4(),
             expires_at,
             is_verified,
-        }
+        })
     }
 
     pub fn insert(

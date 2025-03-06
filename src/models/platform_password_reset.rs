@@ -9,13 +9,15 @@ use uuid::Uuid;
 pub enum PlatformPasswordResetError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] diesel::result::Error),
+    #[error("Invalid expiration hours: {0}")]
+    InvalidExpirationHours(String),
 }
 
 #[derive(Queryable, Identifiable, AsChangeset, Serialize, Deserialize, Clone, Debug)]
 #[diesel(table_name = platform_password_reset_requests)]
 pub struct PlatformPasswordResetRequest {
     pub id: i32,
-    pub user_id: Uuid,
+    pub platform_user_id: Uuid,
     pub hashed_secret: String,
     pub encrypted_code: Vec<u8>,
     pub expiration_time: DateTime<Utc>,
@@ -31,7 +33,7 @@ impl PlatformPasswordResetRequest {
         lookup_encrypted_code: &[u8],
     ) -> Result<Option<PlatformPasswordResetRequest>, PlatformPasswordResetError> {
         platform_password_reset_requests::table
-            .filter(platform_password_reset_requests::user_id.eq(lookup_user_id))
+            .filter(platform_password_reset_requests::platform_user_id.eq(lookup_user_id))
             .filter(platform_password_reset_requests::encrypted_code.eq(lookup_encrypted_code))
             .filter(platform_password_reset_requests::is_reset.eq(false))
             .first::<PlatformPasswordResetRequest>(conn)
@@ -56,7 +58,7 @@ impl PlatformPasswordResetRequest {
 #[derive(Insertable)]
 #[diesel(table_name = platform_password_reset_requests)]
 pub struct NewPlatformPasswordResetRequest {
-    pub user_id: Uuid,
+    pub platform_user_id: Uuid,
     pub hashed_secret: String,
     pub encrypted_code: Vec<u8>,
     pub expiration_time: DateTime<Utc>,
@@ -64,17 +66,23 @@ pub struct NewPlatformPasswordResetRequest {
 
 impl NewPlatformPasswordResetRequest {
     pub fn new(
-        user_id: Uuid,
+        platform_user_id: Uuid,
         hashed_secret: String,
         encrypted_code: Vec<u8>,
         expiration_hours: i64,
-    ) -> Self {
-        NewPlatformPasswordResetRequest {
-            user_id,
+    ) -> Result<Self, PlatformPasswordResetError> {
+        if expiration_hours <= 0 {
+            return Err(PlatformPasswordResetError::InvalidExpirationHours(
+                "expiration_hours must be positive".to_string(),
+            ));
+        }
+
+        Ok(NewPlatformPasswordResetRequest {
+            platform_user_id,
             hashed_secret,
             encrypted_code,
             expiration_time: Utc::now() + chrono::Duration::hours(expiration_hours),
-        }
+        })
     }
 
     pub fn insert(

@@ -118,7 +118,8 @@ async fn update_membership(
         }
     };
 
-    if membership.role != OrgRole::Owner.as_str() {
+    let role: OrgRole = membership.role.clone().into();
+    if !matches!(role, OrgRole::Owner) {
         error!(
             "User {} attempted to update membership but has role '{}', not Owner",
             platform_user.uuid, membership.role
@@ -208,7 +209,8 @@ async fn delete_membership(
         .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
         .map_err(|_| ApiError::Unauthorized)?;
 
-    if membership.role != OrgRole::Owner.as_str() {
+    let role: OrgRole = membership.role.clone().into();
+    if !matches!(role, OrgRole::Owner) {
         return Err(ApiError::Unauthorized);
     }
 

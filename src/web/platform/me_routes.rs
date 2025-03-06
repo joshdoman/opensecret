@@ -150,7 +150,7 @@ async fn request_platform_verification(
                 return encrypt_response(&data, &session_id, &response).await;
             }
             // Delete the old verification
-            if let Err(e) = verification.delete(&mut data.db.get_pool().get().unwrap()) {
+            if let Err(e) = data.db.delete_platform_email_verification(&verification) {
                 error!("Error deleting old platform verification: {:?}", e);
                 return Err(ApiError::InternalServerError);
             }
@@ -165,7 +165,14 @@ async fn request_platform_verification(
     }
 
     // Create a new verification entry
-    let new_verification = NewPlatformEmailVerification::new(platform_user.uuid, 24, false); // 24 hours expiration
+    let new_verification = match NewPlatformEmailVerification::new(platform_user.uuid, 24, false) {
+        // 24 hours expiration
+        Ok(v) => v,
+        Err(e) => {
+            error!("Error creating platform email verification: {:?}", e);
+            return Err(ApiError::InternalServerError);
+        }
+    };
     let verification = match data.db.create_platform_email_verification(new_verification) {
         Ok(v) => v,
         Err(e) => {

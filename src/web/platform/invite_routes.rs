@@ -77,10 +77,16 @@ async fn create_invite(
     }
 
     // Create the invite code with the specified role (or default admin)
+    // Validate that the role is a valid OrgRole
+    let role: OrgRole = create_request
+        .role
+        .as_str()
+        .try_into()
+        .map_err(|_| ApiError::BadRequest)?;
     let new_invite = NewInviteCode::new(
         org.id,
         create_request.email.clone(),
-        create_request.role.as_str().to_string(),
+        role.as_str().to_string(),
         24, // 24 hour expiry
     );
 
@@ -207,16 +213,16 @@ async fn get_invite(
 
     // Check if user is the invite recipient or an org admin/owner
     let is_invited_user = platform_user.email == invite.email;
-    let is_org_admin = match data
+
+    // Fetch membership once and use it for role check
+    let is_org_admin = data
         .db
         .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
-    {
-        Ok(membership) => {
+        .map(|membership| {
             let role: OrgRole = membership.role.into();
             matches!(role, OrgRole::Owner | OrgRole::Admin)
-        }
-        Err(_) => false,
-    };
+        })
+        .unwrap_or(false);
 
     // Only allow access if user is the invite recipient or an org admin/owner
     if !is_invited_user && !is_org_admin {

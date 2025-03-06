@@ -71,6 +71,12 @@ pub struct UpdateEmailSettingsRequest {
     pub provider: String,
     #[validate(email)]
     pub send_from: String,
+    #[validate(length(
+        min = 1,
+        max = 255,
+        message = "URL must not be empty and must not exceed 255 characters"
+    ))]
+    #[validate(url(message = "Invalid URL format"))]
     pub email_verification_url: String,
 }
 
@@ -176,7 +182,7 @@ pub fn validate_email_provider(provider: &str) -> Result<(), validator::Validati
 }
 
 pub fn validate_oauth_provider_settings(
-    settings: &&OAuthProviderSettings,
+    settings: &OAuthProviderSettings,
 ) -> Result<(), validator::ValidationError> {
     // Validate client_id
     if settings.client_id.is_empty() || settings.client_id.len() > 255 {

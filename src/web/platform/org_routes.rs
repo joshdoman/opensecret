@@ -1,5 +1,5 @@
 use crate::{
-    models::{orgs::NewOrg, platform_users::PlatformUser},
+    models::{org_memberships::OrgRole, orgs::NewOrg, platform_users::PlatformUser},
     web::encryption_middleware::{decrypt_request, encrypt_response, EncryptedResponse},
     ApiError, AppState,
 };
@@ -128,7 +128,8 @@ async fn delete_org(
         .get_org_membership_by_platform_user_and_org(platform_user.uuid, org.id)
         .map_err(|_| ApiError::Unauthorized)?;
 
-    if membership.role != "owner" {
+    let role: OrgRole = membership.role.clone().into();
+    if !matches!(role, OrgRole::Owner) {
         return Err(ApiError::Unauthorized);
     }
 

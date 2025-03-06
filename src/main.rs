@@ -48,6 +48,7 @@ use std::io::{Read, Write};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use subtle::ConstantTimeEq;
 use tokio::spawn;
 use tokio::sync::RwLock;
 use tokio::task::{self};
@@ -986,15 +987,15 @@ impl AppState {
                 return Err(Error::PasswordResetExpired);
             }
 
-            trace!("Stored hashed secret: {}", reset_request.hashed_secret);
-
             // Hash the plaintext secret again for comparison
             let hashed_plaintext = generate_reset_hash(plaintext_secret.clone());
 
-            trace!("Newly hashed plaintext secret: {}", hashed_plaintext);
-
-            // Compare the hashed values directly
-            if hashed_plaintext == reset_request.hashed_secret {
+            // Compare the hashed values using constant-time comparison
+            if hashed_plaintext
+                .as_bytes()
+                .ct_eq(reset_request.hashed_secret.as_bytes())
+                .into()
+            {
                 // Password verification succeeded, continue with reset
                 self.update_user_password(&user, new_password).await?;
                 self.db.mark_password_reset_as_complete(&reset_request)?;
@@ -1057,12 +1058,20 @@ impl AppState {
                     let encrypted_code =
                         encrypt_key_deterministic(&secret_key, alphanumeric_code.as_bytes());
 
-                    let new_request = NewPlatformPasswordResetRequest::new(
+                    let new_request = match NewPlatformPasswordResetRequest::new(
                         platform_user.uuid,
                         hashed_secret,
                         encrypted_code,
                         24, // 24 hours expiration
-                    );
+                    ) {
+                        Ok(req) => req,
+                        Err(e) => {
+                            return Err(Error::EncryptionError(format!(
+                                "Invalid expiration hours: {}",
+                                e
+                            )))
+                        }
+                    };
 
                     self.db
                         .create_platform_password_reset_request(new_request)?;
@@ -1139,15 +1148,15 @@ impl AppState {
                 return Err(Error::PasswordResetExpired);
             }
 
-            trace!("Stored hashed secret: {}", reset_request.hashed_secret);
-
             // Hash the plaintext secret again for comparison
             let hashed_plaintext = generate_reset_hash(plaintext_secret.clone());
 
-            trace!("Newly hashed plaintext secret: {}", hashed_plaintext);
-
-            // Compare the hashed values directly
-            if hashed_plaintext == reset_request.hashed_secret {
+            // Compare the hashed values using constant-time comparison
+            if hashed_plaintext
+                .as_bytes()
+                .ct_eq(reset_request.hashed_secret.as_bytes())
+                .into()
+            {
                 // Password verification succeeded, continue with reset
                 // Hash the new password
                 let password_hash = password_auth::generate_hash(new_password.clone());

@@ -283,7 +283,13 @@ pub async fn register_platform_user(
         })?;
 
     // Create platform email verification
-    let new_verification = NewPlatformEmailVerification::new(platform_user.uuid, 24, false);
+    let new_verification = match NewPlatformEmailVerification::new(platform_user.uuid, 24, false) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Error creating platform email verification: {:?}", e);
+            return Err(ApiError::InternalServerError);
+        }
+    };
     let verification = match data.db.create_platform_email_verification(new_verification) {
         Ok(v) => v,
         Err(e) => {
@@ -393,12 +399,16 @@ pub async fn verify_platform_email(
 
     // Check if verification is expired
     if verification.expires_at < Utc::now() {
+        error!(
+            "verification is expired for user: {}",
+            verification.platform_user_id
+        );
         return Err(ApiError::BadRequest);
     }
 
     // Mark the verification as verified
     let mut verification_to_update = verification.clone();
-    if let Err(e) = verification_to_update.verify(&mut data.db.get_pool().get().unwrap()) {
+    if let Err(e) = data.db.verify_platform_email(&mut verification_to_update) {
         error!("Error verifying platform email: {:?}", e);
         return Err(ApiError::InternalServerError);
     }

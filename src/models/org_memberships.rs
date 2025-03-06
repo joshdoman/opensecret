@@ -43,6 +43,32 @@ impl From<String> for OrgRole {
     }
 }
 
+impl From<&String> for OrgRole {
+    fn from(s: &String) -> Self {
+        match s.to_lowercase().as_str() {
+            "owner" => OrgRole::Owner,
+            "admin" => OrgRole::Admin,
+            "developer" => OrgRole::Developer,
+            "viewer" => OrgRole::Viewer,
+            _ => OrgRole::Viewer, // Default to lowest privilege
+        }
+    }
+}
+
+impl TryFrom<&str> for OrgRole {
+    type Error = ();
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s.to_lowercase().as_str() {
+            "owner" => Ok(OrgRole::Owner),
+            "admin" => Ok(OrgRole::Admin),
+            "developer" => Ok(OrgRole::Developer),
+            "viewer" => Ok(OrgRole::Viewer),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Queryable, Identifiable, AsChangeset, Serialize, Deserialize, Clone, Debug)]
 #[diesel(table_name = org_memberships)]
 pub struct OrgMembership {
@@ -204,7 +230,7 @@ impl OrgMembership {
     }
 
     pub fn get_role(&self) -> OrgRole {
-        self.role.clone().into()
+        (&self.role).into()
     }
 
     pub fn update_role_with_owner_check(
@@ -215,7 +241,8 @@ impl OrgMembership {
         // Start transaction
         conn.transaction(|conn| {
             // If changing from owner role, check if this is the last owner
-            if membership.role == OrgRole::Owner.as_str() && new_role != OrgRole::Owner {
+            let current_role: OrgRole = (&membership.role).into();
+            if current_role == OrgRole::Owner && new_role != OrgRole::Owner {
                 // First, get all owner memberships with FOR UPDATE lock
                 let owner_memberships = org_memberships::table
                     .filter(org_memberships::org_id.eq(membership.org_id))
@@ -254,7 +281,8 @@ impl OrgMembership {
         // Start transaction
         conn.transaction(|conn| {
             // If deleting an owner, check if this is the last owner
-            if membership.role == OrgRole::Owner.as_str() {
+            let current_role: OrgRole = (&membership.role).into();
+            if current_role == OrgRole::Owner {
                 // First, get all owner memberships with FOR UPDATE lock
                 let owner_memberships = org_memberships::table
                     .filter(org_memberships::org_id.eq(membership.org_id))

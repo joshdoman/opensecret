@@ -558,7 +558,7 @@ pub async fn send_platform_password_reset_email(
 
     let resend = Resend::new(&api_key);
 
-    let to = [to_email.clone()];
+    let to = [to_email];
     let from_email = from_opensecret_email(app_state.app_mode.clone());
     let subject = "Reset Your OpenSecret Platform Password";
 
