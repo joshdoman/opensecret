@@ -6,7 +6,7 @@ use crate::{
         platform_users::NewPlatformUser,
     },
     web::encryption_middleware::{decrypt_request, encrypt_response, EncryptedResponse},
-    ApiError, AppState,
+    ApiError, AppState, Error,
 };
 use axum::{
     extract::{Path, State},
@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 use tokio::spawn;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 use validator::Validate;
 
@@ -75,6 +75,42 @@ pub struct PlatformRefreshResponse {
     pub refresh_token: String,
 }
 
+#[derive(Deserialize, Clone, Validate)]
+pub struct PlatformLogoutRequest {
+    #[validate(length(min = 1, message = "Refresh token cannot be empty"))]
+    pub refresh_token: String,
+}
+
+#[derive(Deserialize, Clone, Validate)]
+pub struct PlatformPasswordResetRequestPayload {
+    #[validate(email(message = "Invalid email format"))]
+    #[validate(length(max = 255, message = "Email must not exceed 255 characters"))]
+    pub email: String,
+
+    #[validate(length(min = 1, message = "Hashed secret cannot be empty"))]
+    pub hashed_secret: String,
+}
+
+#[derive(Deserialize, Clone, Validate)]
+pub struct PlatformPasswordResetConfirmPayload {
+    #[validate(email(message = "Invalid email format"))]
+    #[validate(length(max = 255, message = "Email must not exceed 255 characters"))]
+    pub email: String,
+
+    #[validate(length(min = 1, message = "Alphanumeric code cannot be empty"))]
+    pub alphanumeric_code: String,
+
+    #[validate(length(min = 1, message = "Plaintext secret cannot be empty"))]
+    pub plaintext_secret: String,
+
+    #[validate(length(
+        min = 8,
+        max = 64,
+        message = "New password must be between 8 and 64 characters"
+    ))]
+    pub new_password: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct PlatformOrg {
     pub id: i32,
@@ -121,9 +157,30 @@ pub fn router(app_state: Arc<AppState>) -> Router<()> {
             )),
         )
         .route(
+            "/platform/logout",
+            post(logout_platform_user).layer(from_fn_with_state(
+                app_state.clone(),
+                decrypt_request::<PlatformLogoutRequest>,
+            )),
+        )
+        .route(
             "/platform/verify-email/:code",
             get(verify_platform_email)
                 .layer(from_fn_with_state(app_state.clone(), decrypt_request::<()>)),
+        )
+        .route(
+            "/platform/password-reset/request",
+            post(platform_password_reset_request).layer(from_fn_with_state(
+                app_state.clone(),
+                decrypt_request::<PlatformPasswordResetRequestPayload>,
+            )),
+        )
+        .route(
+            "/platform/password-reset/confirm",
+            post(platform_password_reset_confirm).layer(from_fn_with_state(
+                app_state.clone(),
+                decrypt_request::<PlatformPasswordResetConfirmPayload>,
+            )),
         )
         .with_state(app_state)
 }
@@ -352,5 +409,135 @@ pub async fn verify_platform_email(
 
     let result = encrypt_response(&data, &session_id, &response).await;
     debug!("Exiting verify_platform_email function");
+    result
+}
+
+pub async fn logout_platform_user(
+    State(data): State<Arc<AppState>>,
+    Extension(logout_request): Extension<PlatformLogoutRequest>,
+    Extension(session_id): Extension<Uuid>,
+) -> Result<Json<EncryptedResponse<serde_json::Value>>, ApiError> {
+    debug!("Entering logout_platform_user function");
+    info!("Platform logout request received");
+
+    // TODO: Implement token invalidation logic here when needed
+    tracing::trace!(
+        "Platform logout request for refresh token: {}",
+        logout_request.refresh_token
+    );
+
+    let response = json!({ "message": "Logged out successfully" });
+    let result = encrypt_response(&data, &session_id, &response).await;
+    debug!("Exiting logout_platform_user function");
+    result
+}
+
+pub async fn platform_password_reset_request(
+    State(data): State<Arc<AppState>>,
+    Extension(payload): Extension<PlatformPasswordResetRequestPayload>,
+    Extension(session_id): Extension<Uuid>,
+) -> Result<Json<EncryptedResponse<serde_json::Value>>, ApiError> {
+    debug!("Entering platform_password_reset_request function");
+
+    // Validate request
+    if let Err(errors) = payload.validate() {
+        error!("Validation error: {:?}", errors);
+        return Err(ApiError::BadRequest);
+    }
+
+    // Check if user exists and is not an OAuth-only user
+    match data.db.get_platform_user_by_email(&payload.email) {
+        Ok(Some(user)) => {
+            if user.password_enc.is_none() {
+                error!("OAuth-only platform user attempted to reset password");
+                // Still return success to not leak information about the account
+                let response = json!({
+                    "message": "If an account with that email exists, we have sent a password reset link."
+                });
+                return encrypt_response(&data, &session_id, &response).await;
+            }
+        }
+        Ok(None) => {
+            // User doesn't exist, but we don't want to leak this information
+            let response = json!({
+                "message": "If an account with that email exists, we have sent a password reset link."
+            });
+            return encrypt_response(&data, &session_id, &response).await;
+        }
+        Err(e) => {
+            error!("Error in platform password reset request: {:?}", e);
+            return Err(ApiError::InternalServerError);
+        }
+    }
+
+    // Process the password reset request
+    let _ = data
+        .create_platform_password_reset_request(payload.email.clone(), payload.hashed_secret)
+        .await
+        .map_err(|e| {
+            error!("Error in create_platform_password_reset_request: {:?}", e);
+            // We don't expose this error to the user
+        });
+
+    let response = json!({
+        "message": "If an account with that email exists, we have sent a password reset link."
+    });
+    let result = encrypt_response(&data, &session_id, &response).await;
+    debug!("Exiting platform_password_reset_request function");
+    result
+}
+
+pub async fn platform_password_reset_confirm(
+    State(data): State<Arc<AppState>>,
+    Extension(payload): Extension<PlatformPasswordResetConfirmPayload>,
+    Extension(session_id): Extension<Uuid>,
+) -> Result<Json<EncryptedResponse<serde_json::Value>>, ApiError> {
+    debug!("Entering platform_password_reset_confirm function");
+
+    // Validate request
+    if let Err(errors) = payload.validate() {
+        error!("Validation error: {:?}", errors);
+        return Err(ApiError::BadRequest);
+    }
+
+    // Check if user exists and is not an OAuth-only user
+    match data.db.get_platform_user_by_email(&payload.email) {
+        Ok(Some(user)) => {
+            if user.password_enc.is_none() {
+                error!("OAuth-only platform user attempted to reset password");
+                return Err(ApiError::InvalidUsernameOrPassword);
+            }
+        }
+        Ok(None) => {
+            error!("Platform user not found in password reset confirm");
+            return Err(ApiError::InvalidUsernameOrPassword);
+        }
+        Err(e) => {
+            error!("Error in platform password reset confirm: {:?}", e);
+            return Err(ApiError::InternalServerError);
+        }
+    }
+
+    // Proceed with password reset confirmation
+    data.confirm_platform_password_reset(
+        payload.email,
+        payload.alphanumeric_code,
+        payload.plaintext_secret,
+        payload.new_password,
+    )
+    .await
+    .map_err(|e| match e {
+        Error::PasswordResetExpired => ApiError::BadRequest,
+        Error::InvalidPasswordResetSecret => ApiError::BadRequest,
+        Error::InvalidPasswordResetRequest => ApiError::BadRequest,
+        _ => ApiError::InternalServerError,
+    })?;
+
+    let response = json!({
+        "message": "Password reset successful. You can now log in with your new password."
+    });
+
+    let result = encrypt_response(&data, &session_id, &response).await;
+    debug!("Exiting platform_password_reset_confirm function");
     result
 }

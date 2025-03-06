@@ -1,5 +1,7 @@
-use crate::email::send_password_reset_confirmation_email;
-use crate::email::send_password_reset_email;
+use crate::email::{
+    send_password_reset_confirmation_email, send_password_reset_email,
+    send_platform_password_reset_confirmation_email, send_platform_password_reset_email,
+};
 use crate::encrypt::encrypt_key_deterministic;
 use crate::encrypt::generate_random;
 use crate::encrypt::{
@@ -8,6 +10,7 @@ use crate::encrypt::{
 use crate::jwt::validate_platform_jwt;
 use crate::login_routes::RegisterCredentials;
 use crate::models::password_reset::NewPasswordResetRequest;
+use crate::models::platform_password_reset::NewPlatformPasswordResetRequest;
 use crate::models::platform_users::PlatformUser;
 use crate::sqs::SqsEventPublisher;
 use crate::web::platform_login_routes;
@@ -45,6 +48,7 @@ use std::io::{Read, Write};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::spawn;
 use tokio::sync::RwLock;
 use tokio::task::{self};
 use tower_http::cors::{Any, CorsLayer};
@@ -1035,6 +1039,162 @@ impl AppState {
             .collect()
     }
 
+    pub async fn create_platform_password_reset_request(
+        &self,
+        email: String,
+        hashed_secret: String,
+    ) -> Result<String, Error> {
+        let alphanumeric_code = self.generate_alphanumeric_code();
+
+        // Check if the platform user exists
+        match self.db.get_platform_user_by_email(&email) {
+            Ok(Some(platform_user)) => {
+                // Only proceed with email if user has a password
+                if platform_user.password_enc.is_some() {
+                    // User exists, proceed with the actual reset request
+                    let secret_key = SecretKey::from_slice(&self.enclave_key)
+                        .map_err(|e| Error::EncryptionError(e.to_string()))?;
+                    let encrypted_code =
+                        encrypt_key_deterministic(&secret_key, alphanumeric_code.as_bytes());
+
+                    let new_request = NewPlatformPasswordResetRequest::new(
+                        platform_user.uuid,
+                        hashed_secret,
+                        encrypted_code,
+                        24, // 24 hours expiration
+                    );
+
+                    self.db
+                        .create_platform_password_reset_request(new_request)?;
+
+                    // Send the actual email in the background
+                    let app_state = self.clone();
+                    let user_email = email.clone();
+                    let code = alphanumeric_code.clone();
+                    spawn(async move {
+                        if let Err(e) = send_platform_password_reset_email(
+                            &app_state,
+                            app_state.resend_api_key.clone(),
+                            user_email,
+                            code,
+                        )
+                        .await
+                        {
+                            error!("Failed to send platform password reset email: {:?}", e);
+                        }
+                    });
+                }
+            }
+            Ok(None) => {
+                // User doesn't exist, but we don't want to reveal this information
+                // So we'll just log it and return as if everything was successful
+                debug!(
+                    "Password reset requested for non-existent platform email: {}",
+                    email
+                );
+            }
+            Err(e) => {
+                // For other errors, we should still log them but not expose them to the user
+                error!("Error during platform password reset request: {:?}", e);
+            }
+        }
+
+        // Always return the generated code, even if we didn't actually create a request
+        Ok(alphanumeric_code)
+    }
+
+    pub async fn confirm_platform_password_reset(
+        &self,
+        email: String,
+        alphanumeric_code: String,
+        plaintext_secret: String,
+        new_password: String,
+    ) -> Result<(), Error> {
+        trace!("Confirm platform password reset for {email} with code {alphanumeric_code}");
+
+        let platform_user = match self.db.get_platform_user_by_email(&email) {
+            Ok(Some(user)) => user,
+            Ok(None) => return Err(Error::UserNotFound),
+            Err(_) => return Err(Error::UserNotFound),
+        };
+
+        // Deterministically encrypt the provided alphanumeric code for lookup
+        let secret_key = SecretKey::from_slice(&self.enclave_key)
+            .map_err(|e| Error::EncryptionError(e.to_string()))?;
+        let encrypted_code = encrypt_key_deterministic(&secret_key, alphanumeric_code.as_bytes());
+
+        let reset_request = self
+            .db
+            .get_platform_password_reset_request_by_user_id_and_code(
+                platform_user.uuid,
+                encrypted_code,
+            )?;
+
+        if let Some(reset_request) = reset_request {
+            if reset_request.is_expired() {
+                warn!(
+                    "Platform password reset expired for user: {}",
+                    platform_user.uuid
+                );
+                return Err(Error::PasswordResetExpired);
+            }
+
+            trace!("Stored hashed secret: {}", reset_request.hashed_secret);
+
+            // Hash the plaintext secret again for comparison
+            let hashed_plaintext = generate_reset_hash(plaintext_secret.clone());
+
+            trace!("Newly hashed plaintext secret: {}", hashed_plaintext);
+
+            // Compare the hashed values directly
+            if hashed_plaintext == reset_request.hashed_secret {
+                // Password verification succeeded, continue with reset
+                // Hash the new password
+                let password_hash = password_auth::generate_hash(new_password.clone());
+
+                // Encrypt the hashed password
+                let secret_key = SecretKey::from_slice(&self.enclave_key)
+                    .map_err(|e| Error::EncryptionError(e.to_string()))?;
+                let encrypted_password =
+                    encrypt_with_key(&secret_key, password_hash.as_bytes()).await;
+
+                // Update the platform user's password
+                self.db
+                    .update_platform_user_password(&platform_user, encrypted_password)?;
+                self.db
+                    .mark_platform_password_reset_as_complete(&reset_request)?;
+
+                // Send confirmation email in the background
+                let user_email = platform_user.email.clone();
+                let app_state = self.clone();
+                spawn(async move {
+                    if let Err(e) = send_platform_password_reset_confirmation_email(
+                        &app_state,
+                        app_state.resend_api_key.clone(),
+                        user_email,
+                    )
+                    .await
+                    {
+                        error!(
+                            "Failed to send platform password reset confirmation email: {:?}",
+                            e
+                        );
+                    }
+                });
+
+                Ok(())
+            } else {
+                warn!(
+                    "Password verification failed for platform user {}. Hashes do not match.",
+                    platform_user.uuid
+                );
+                Err(Error::InvalidPasswordResetSecret)
+            }
+        } else {
+            Err(Error::InvalidPasswordResetRequest)
+        }
+    }
+
     pub async fn update_user_password(
         &self,
         user: &User,
@@ -1051,6 +1211,25 @@ impl AppState {
         // Update the user's password
         self.db
             .update_user_password(user, Some(encrypted_password))
+            .map_err(Error::from)
+    }
+
+    pub async fn update_platform_user_password(
+        &self,
+        user: &PlatformUser,
+        new_password: String,
+    ) -> Result<(), Error> {
+        // Hash the new password
+        let password_hash = password_auth::generate_hash(new_password);
+
+        // Encrypt the hashed password
+        let secret_key = SecretKey::from_slice(&self.enclave_key)
+            .map_err(|e| Error::EncryptionError(e.to_string()))?;
+        let encrypted_password = encrypt_with_key(&secret_key, password_hash.as_bytes()).await;
+
+        // Update the platform user's password
+        self.db
+            .update_platform_user_password(user, encrypted_password)
             .map_err(Error::from)
     }
 

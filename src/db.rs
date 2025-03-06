@@ -16,6 +16,9 @@ use crate::models::password_reset::{
 use crate::models::platform_email_verification::{
     NewPlatformEmailVerification, PlatformEmailVerification, PlatformEmailVerificationError,
 };
+use crate::models::platform_password_reset::{
+    NewPlatformPasswordResetRequest, PlatformPasswordResetError, PlatformPasswordResetRequest,
+};
 use crate::models::platform_users::{NewPlatformUser, PlatformUser, PlatformUserError};
 use crate::models::project_settings::OAuthSettings;
 use crate::models::project_settings::{
@@ -86,6 +89,10 @@ pub enum DBError {
     PlatformEmailVerificationError(#[from] PlatformEmailVerificationError),
     #[error("Platform email verification not found")]
     PlatformEmailVerificationNotFound,
+    #[error("Platform password reset error: {0}")]
+    PlatformPasswordResetError(#[from] PlatformPasswordResetError),
+    #[error("Platform password reset request not found")]
+    PlatformPasswordResetRequestNotFound,
     #[error("Org membership error: {0}")]
     OrgMembershipError(#[from] OrgMembershipError),
     #[error("Org membership not found")]
@@ -365,6 +372,23 @@ pub trait DBConnection {
     fn verify_platform_email(
         &self,
         verification: &mut PlatformEmailVerification,
+    ) -> Result<(), DBError>;
+
+    // Platform password reset methods
+    fn create_platform_password_reset_request(
+        &self,
+        new_request: NewPlatformPasswordResetRequest,
+    ) -> Result<PlatformPasswordResetRequest, DBError>;
+
+    fn get_platform_password_reset_request_by_user_id_and_code(
+        &self,
+        user_id: Uuid,
+        encrypted_code: Vec<u8>,
+    ) -> Result<Option<PlatformPasswordResetRequest>, DBError>;
+
+    fn mark_platform_password_reset_as_complete(
+        &self,
+        request: &PlatformPasswordResetRequest,
     ) -> Result<(), DBError>;
 }
 
@@ -1463,6 +1487,52 @@ impl DBConnection for PostgresConnection {
         let result = verification.verify(conn).map_err(DBError::from);
         if let Err(ref e) = result {
             error!("Failed to verify platform email: {:?}", e);
+        }
+        result
+    }
+
+    // Platform password reset implementations
+    fn create_platform_password_reset_request(
+        &self,
+        new_request: NewPlatformPasswordResetRequest,
+    ) -> Result<PlatformPasswordResetRequest, DBError> {
+        debug!("Creating new platform password reset request");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = new_request.insert(conn).map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!("Failed to create platform password reset request: {:?}", e);
+        }
+        result
+    }
+
+    fn get_platform_password_reset_request_by_user_id_and_code(
+        &self,
+        user_id: Uuid,
+        encrypted_code: Vec<u8>,
+    ) -> Result<Option<PlatformPasswordResetRequest>, DBError> {
+        debug!("Getting platform password reset request by user_id and encrypted code");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result =
+            PlatformPasswordResetRequest::get_by_user_id_and_code(conn, user_id, &encrypted_code)
+                .map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!("Failed to get platform password reset request: {:?}", e);
+        }
+        result
+    }
+
+    fn mark_platform_password_reset_as_complete(
+        &self,
+        request: &PlatformPasswordResetRequest,
+    ) -> Result<(), DBError> {
+        debug!("Marking platform password reset request as complete");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = request.mark_as_reset(conn).map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!(
+                "Failed to mark platform password reset request as complete: {:?}",
+                e
+            );
         }
         result
     }

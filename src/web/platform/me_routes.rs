@@ -11,13 +11,32 @@ use axum::{
     routing::{get, post},
     Extension, Json, Router,
 };
+use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::spawn;
 use tracing::{debug, error};
 use uuid::Uuid;
+use validator::Validate;
 
 use super::common::{MeResponse, OrgResponse, PlatformUserResponse};
+
+#[derive(Deserialize, Clone, Validate)]
+pub struct PlatformChangePasswordRequest {
+    #[validate(length(
+        min = 8,
+        max = 64,
+        message = "Current password must be between 8 and 64 characters"
+    ))]
+    pub current_password: String,
+
+    #[validate(length(
+        min = 8,
+        max = 64,
+        message = "New password must be between 8 and 64 characters"
+    ))]
+    pub new_password: String,
+}
 
 pub fn router(app_state: Arc<AppState>) -> Router {
     Router::new()
@@ -30,6 +49,13 @@ pub fn router(app_state: Arc<AppState>) -> Router {
             "/platform/request_verification",
             post(request_platform_verification)
                 .layer(from_fn_with_state(app_state.clone(), decrypt_request::<()>)),
+        )
+        .route(
+            "/platform/change-password",
+            post(platform_change_password).layer(from_fn_with_state(
+                app_state.clone(),
+                decrypt_request::<PlatformChangePasswordRequest>,
+            )),
         )
         .with_state(app_state)
 }
@@ -169,4 +195,54 @@ async fn request_platform_verification(
     let response = json!({ "message": "New verification code sent successfully" });
     debug!("Exiting request_platform_verification function");
     encrypt_response(&data, &session_id, &response).await
+}
+
+pub async fn platform_change_password(
+    State(data): State<Arc<AppState>>,
+    Extension(platform_user): Extension<PlatformUser>,
+    Extension(change_request): Extension<PlatformChangePasswordRequest>,
+    Extension(session_id): Extension<Uuid>,
+) -> Result<Json<EncryptedResponse<serde_json::Value>>, ApiError> {
+    debug!("Entering platform_change_password function");
+
+    // Validate request
+    if let Err(errors) = change_request.validate() {
+        error!("Validation error: {:?}", errors);
+        return Err(ApiError::BadRequest);
+    }
+
+    // Check if user is an OAuth-only user
+    if platform_user.password_enc.is_none() {
+        error!("OAuth-only platform user attempted to change password");
+        return Err(ApiError::InvalidUsernameOrPassword);
+    }
+
+    // Verify current password
+    match data
+        .authenticate_platform_user(&platform_user.email, change_request.current_password)
+        .await
+    {
+        Ok(Some(authenticated_user)) if authenticated_user.uuid == platform_user.uuid => {
+            // Current password is correct, proceed with password change
+            match data
+                .update_platform_user_password(&platform_user, change_request.new_password)
+                .await
+            {
+                Ok(()) => {
+                    let response = json!({ "message": "Password changed successfully" });
+                    debug!("Exiting platform_change_password function");
+                    encrypt_response(&data, &session_id, &response).await
+                }
+                Err(e) => {
+                    error!("Error changing platform user password: {:?}", e);
+                    Err(ApiError::InternalServerError)
+                }
+            }
+        }
+        _ => {
+            // Current password is incorrect
+            error!("Invalid current password in platform change password request");
+            Err(ApiError::InvalidUsernameOrPassword)
+        }
+    }
 }

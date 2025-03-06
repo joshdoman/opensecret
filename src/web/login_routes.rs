@@ -240,7 +240,7 @@ pub async fn logout(
     debug!("Entering logout function");
     info!("Logout request received");
     // TODO actually delete the refresh token
-    tracing::info!(
+    tracing::trace!(
         "Logout request for refresh token: {}",
         logout_request.refresh_token
     );
