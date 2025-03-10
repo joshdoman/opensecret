@@ -463,7 +463,7 @@ pub async fn send_platform_invite_email(
     invite_code: Uuid,
     org_id: Uuid,
 ) -> Result<(), EmailError> {
-    tracing::debug!("Entering send_invite_email");
+    tracing::debug!("Entering send_platform_invite_email");
     if resend_api_key.is_none() {
         return Err(EmailError::ApiKeyNotFound);
     }
@@ -529,7 +529,7 @@ pub async fn send_platform_invite_email(
         EmailError::UnknownError
     });
 
-    tracing::debug!("Exiting send_invite_email");
+    tracing::debug!("Exiting send_platform_invite_email");
     Ok(())
 }
 

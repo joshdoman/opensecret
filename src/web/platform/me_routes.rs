@@ -93,25 +93,24 @@ async fn get_platform_user(
     };
 
     // Create the list of organizations with roles
-    let mut organizations = Vec::new();
-    for membership in memberships {
-        let org_id = membership.org_id;
+    let organizations = memberships
+        .into_iter()
+        .filter_map(|membership| {
+            let org_id = membership.org_id;
 
-        // Fetch the organization details
-        let org = match data.db.get_org_by_id(org_id) {
-            Ok(org) => org,
-            Err(e) => {
-                error!("Error fetching organization {}: {:?}", org_id, e);
-                continue; // Skip this organization but continue processing others
+            // Fetch the organization details
+            match data.db.get_org_by_id(org_id) {
+                Ok(org) => Some(OrgResponse {
+                    id: org.uuid,
+                    name: org.name,
+                }),
+                Err(e) => {
+                    error!("Error fetching organization {}: {:?}", org_id, e);
+                    None // Skip this organization but continue processing others
+                }
             }
-        };
-
-        // Add to our list of organizations
-        organizations.push(OrgResponse {
-            id: org.uuid,
-            name: org.name,
-        });
-    }
+        })
+        .collect::<Vec<_>>();
 
     // Create the platform user response object
     let user = PlatformUserResponse {

@@ -36,6 +36,7 @@ impl PlatformPasswordResetRequest {
             .filter(platform_password_reset_requests::platform_user_id.eq(lookup_user_id))
             .filter(platform_password_reset_requests::encrypted_code.eq(lookup_encrypted_code))
             .filter(platform_password_reset_requests::is_reset.eq(false))
+            .filter(platform_password_reset_requests::expiration_time.gt(Utc::now()))
             .first::<PlatformPasswordResetRequest>(conn)
             .optional()
             .map_err(PlatformPasswordResetError::DatabaseError)

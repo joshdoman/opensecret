@@ -186,17 +186,21 @@ pub fn validate_oauth_provider_settings(
 ) -> Result<(), validator::ValidationError> {
     // Validate client_id
     if settings.client_id.is_empty() || settings.client_id.len() > 255 {
-        return Err(validator::ValidationError::new("oauth_client_id"));
+        let mut error = validator::ValidationError::new("oauth_client_id");
+        error.message = Some(format!("Client ID must not be empty and must not exceed 255 characters (current length: {})", settings.client_id.len()).into());
+        return Err(error);
     }
     // Validate redirect_url
     if settings.redirect_url.is_empty() || settings.redirect_url.len() > 255 {
-        return Err(validator::ValidationError::new("oauth_redirect_url"));
+        let mut error = validator::ValidationError::new("oauth_redirect_url");
+        error.message = Some(format!("Redirect URL must not be empty and must not exceed 255 characters (current length: {})", settings.redirect_url.len()).into());
+        return Err(error);
     }
     // Basic URL validation
-    if url::Url::parse(&settings.redirect_url).is_err() {
-        return Err(validator::ValidationError::new(
-            "oauth_redirect_url_invalid",
-        ));
+    if let Err(parse_err) = url::Url::parse(&settings.redirect_url) {
+        let mut error = validator::ValidationError::new("oauth_redirect_url_invalid");
+        error.message = Some(format!("Invalid redirect URL: {}", parse_err).into());
+        return Err(error);
     }
     Ok(())
 }

@@ -52,6 +52,9 @@ pub struct PlatformRegisterRequest {
 
     #[validate(length(max = 50, message = "Name must not exceed 50 characters"))]
     pub name: Option<String>,
+
+    #[validate(length(min = 1, message = "Invite code is required"))]
+    pub invite_code: String,
 }
 
 #[derive(Serialize)]
@@ -260,6 +263,21 @@ pub async fn register_platform_user(
         .is_some()
     {
         return Err(ApiError::EmailAlreadyExists);
+    }
+
+    // Validate invite code
+    let invite_code = match Uuid::parse_str(&register_request.invite_code) {
+        Ok(code) => code,
+        Err(e) => {
+            error!("Invalid invite code format: {:?}", e);
+            return Err(ApiError::BadRequest);
+        }
+    };
+
+    // Check if invite code is valid
+    if let Err(e) = data.db.validate_platform_invite_code(invite_code) {
+        error!("Invalid invite code: {:?}", e);
+        return Err(ApiError::BadRequest);
     }
 
     // Hash and encrypt the password

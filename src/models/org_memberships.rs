@@ -56,7 +56,7 @@ impl From<&String> for OrgRole {
 }
 
 impl TryFrom<&str> for OrgRole {
-    type Error = ();
+    type Error = String;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         match s.to_lowercase().as_str() {
@@ -64,7 +64,7 @@ impl TryFrom<&str> for OrgRole {
             "admin" => Ok(OrgRole::Admin),
             "developer" => Ok(OrgRole::Developer),
             "viewer" => Ok(OrgRole::Viewer),
-            _ => Err(()),
+            _ => Err(format!("Invalid role: {}", s)),
         }
     }
 }

@@ -119,6 +119,13 @@ diesel::table! {
 }
 
 diesel::table! {
+    platform_invite_codes (id) {
+        id -> Int4,
+        code -> Uuid,
+    }
+}
+
+diesel::table! {
     platform_password_reset_requests (id) {
         id -> Int4,
         platform_user_id -> Uuid,
@@ -225,6 +232,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     orgs,
     password_reset_requests,
     platform_email_verifications,
+    platform_invite_codes,
     platform_password_reset_requests,
     platform_users,
     project_settings,

@@ -8,6 +8,7 @@ pub mod org_projects;
 pub mod orgs;
 pub mod password_reset;
 pub mod platform_email_verification;
+pub mod platform_invite_codes;
 pub mod platform_password_reset;
 pub mod platform_users;
 pub mod project_settings;

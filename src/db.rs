@@ -16,6 +16,7 @@ use crate::models::password_reset::{
 use crate::models::platform_email_verification::{
     NewPlatformEmailVerification, PlatformEmailVerification, PlatformEmailVerificationError,
 };
+use crate::models::platform_invite_codes::{PlatformInviteCode, PlatformInviteCodeError};
 use crate::models::platform_password_reset::{
     NewPlatformPasswordResetRequest, PlatformPasswordResetError, PlatformPasswordResetRequest,
 };
@@ -81,6 +82,12 @@ pub enum DBError {
     InviteCodeError(#[from] InviteCodeError),
     #[error("Invite code not found")]
     InviteCodeNotFound,
+    #[error("Platform invite code error: {0}")]
+    PlatformInviteCodeError(#[from] PlatformInviteCodeError),
+    #[error("Platform invite code not found")]
+    PlatformInviteCodeNotFound,
+    #[error("Invalid invite code")]
+    InvalidInviteCode,
     #[error("Platform user error: {0}")]
     PlatformUserError(#[from] PlatformUserError),
     #[error("Platform user not found")]
@@ -390,6 +397,9 @@ pub trait DBConnection {
         &self,
         request: &PlatformPasswordResetRequest,
     ) -> Result<(), DBError>;
+
+    // Platform invite code methods
+    fn validate_platform_invite_code(&self, code: Uuid) -> Result<PlatformInviteCode, DBError>;
 }
 
 pub(crate) struct PostgresConnection {
@@ -1533,6 +1543,20 @@ impl DBConnection for PostgresConnection {
                 "Failed to mark platform password reset request as complete: {:?}",
                 e
             );
+        }
+        result
+    }
+
+    // Platform invite code implementations
+    fn validate_platform_invite_code(&self, code: Uuid) -> Result<PlatformInviteCode, DBError> {
+        debug!("Validating platform invite code");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = PlatformInviteCode::validate_code(conn, code).map_err(|e| match e {
+            PlatformInviteCodeError::InviteCodeNotFound(_) => DBError::PlatformInviteCodeNotFound,
+            _ => DBError::from(e),
+        });
+        if let Err(ref e) = result {
+            error!("Failed to validate platform invite code: {:?}", e);
         }
         result
     }
