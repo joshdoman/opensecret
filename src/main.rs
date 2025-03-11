@@ -1,34 +1,34 @@
-use crate::email::send_password_reset_confirmation_email;
-use crate::email::send_password_reset_email;
+use crate::email::{
+    send_password_reset_confirmation_email, send_password_reset_email,
+    send_platform_password_reset_confirmation_email, send_platform_password_reset_email,
+};
 use crate::encrypt::encrypt_key_deterministic;
 use crate::encrypt::generate_random;
 use crate::encrypt::{
     decrypt_with_key, decrypt_with_kms, encrypt_with_key, CustomRng, GenKeyResult,
 };
+use crate::jwt::validate_platform_jwt;
 use crate::login_routes::RegisterCredentials;
 use crate::models::password_reset::NewPasswordResetRequest;
+use crate::models::platform_password_reset::NewPlatformPasswordResetRequest;
 use crate::models::platform_users::PlatformUser;
 use crate::sqs::SqsEventPublisher;
+use crate::web::platform_login_routes;
 use crate::web::{health_routes, login_routes, oauth_routes, openai_routes, protected_routes};
-use crate::{attestation_routes::SessionState, web::platform_org_routes};
+use crate::{attestation_routes::SessionState, web::platform_routes};
 use crate::{
     aws_credentials::AwsCredentialError,
     models::enclave_secrets::NewEnclaveSecret,
     private_key::{decrypt_user_seed_to_key, generate_twelve_word_seed},
 };
-use crate::{billing::BillingClient, web::platform_org_routes::PROJECT_RESEND_API_KEY};
+use crate::{billing::BillingClient, web::platform::common::PROJECT_RESEND_API_KEY};
 use crate::{
     db::{setup_db, DBConnection, DBError},
     models::users::{NewUser, User},
 };
 use crate::{encrypt::create_new_encryption_key, jwt::validate_jwt};
 use aws_credentials::{AwsCredentialManager, AwsCredentials};
-use axum::{
-    http::{Method, StatusCode},
-    middleware::from_fn_with_state,
-    response::IntoResponse,
-    Json,
-};
+use axum::{http::StatusCode, middleware::from_fn_with_state, response::IntoResponse, Json};
 use base64::engine::general_purpose;
 use base64::Engine as _;
 use chacha20poly1305::aead::Aead;
@@ -48,6 +48,8 @@ use std::io::{Read, Write};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use subtle::ConstantTimeEq;
+use tokio::spawn;
 use tokio::sync::RwLock;
 use tokio::task::{self};
 use tower_http::cors::{Any, CorsLayer};
@@ -985,15 +987,15 @@ impl AppState {
                 return Err(Error::PasswordResetExpired);
             }
 
-            trace!("Stored hashed secret: {}", reset_request.hashed_secret);
-
             // Hash the plaintext secret again for comparison
             let hashed_plaintext = generate_reset_hash(plaintext_secret.clone());
 
-            trace!("Newly hashed plaintext secret: {}", hashed_plaintext);
-
-            // Compare the hashed values directly
-            if hashed_plaintext == reset_request.hashed_secret {
+            // Compare the hashed values using constant-time comparison
+            if hashed_plaintext
+                .as_bytes()
+                .ct_eq(reset_request.hashed_secret.as_bytes())
+                .into()
+            {
                 // Password verification succeeded, continue with reset
                 self.update_user_password(&user, new_password).await?;
                 self.db.mark_password_reset_as_complete(&reset_request)?;
@@ -1038,6 +1040,170 @@ impl AppState {
             .collect()
     }
 
+    pub async fn create_platform_password_reset_request(
+        &self,
+        email: String,
+        hashed_secret: String,
+    ) -> Result<String, Error> {
+        let alphanumeric_code = self.generate_alphanumeric_code();
+
+        // Check if the platform user exists
+        match self.db.get_platform_user_by_email(&email) {
+            Ok(Some(platform_user)) => {
+                // Only proceed with email if user has a password
+                if platform_user.password_enc.is_some() {
+                    // User exists, proceed with the actual reset request
+                    let secret_key = SecretKey::from_slice(&self.enclave_key)
+                        .map_err(|e| Error::EncryptionError(e.to_string()))?;
+                    let encrypted_code =
+                        encrypt_key_deterministic(&secret_key, alphanumeric_code.as_bytes());
+
+                    let new_request = match NewPlatformPasswordResetRequest::new(
+                        platform_user.uuid,
+                        hashed_secret,
+                        encrypted_code,
+                        24, // 24 hours expiration
+                    ) {
+                        Ok(req) => req,
+                        Err(e) => {
+                            return Err(Error::EncryptionError(format!(
+                                "Invalid expiration hours: {}",
+                                e
+                            )))
+                        }
+                    };
+
+                    self.db
+                        .create_platform_password_reset_request(new_request)?;
+
+                    // Send the actual email in the background
+                    let app_state = self.clone();
+                    let user_email = email.clone();
+                    let code = alphanumeric_code.clone();
+                    spawn(async move {
+                        if let Err(e) = send_platform_password_reset_email(
+                            &app_state,
+                            app_state.resend_api_key.clone(),
+                            user_email,
+                            code,
+                        )
+                        .await
+                        {
+                            error!("Failed to send platform password reset email: {:?}", e);
+                        }
+                    });
+                }
+            }
+            Ok(None) => {
+                // User doesn't exist, but we don't want to reveal this information
+                // So we'll just log it and return as if everything was successful
+                debug!(
+                    "Password reset requested for non-existent platform email: {}",
+                    email
+                );
+            }
+            Err(e) => {
+                // For other errors, we should still log them but not expose them to the user
+                error!("Error during platform password reset request: {:?}", e);
+            }
+        }
+
+        // Always return the generated code, even if we didn't actually create a request
+        Ok(alphanumeric_code)
+    }
+
+    pub async fn confirm_platform_password_reset(
+        &self,
+        email: String,
+        alphanumeric_code: String,
+        plaintext_secret: String,
+        new_password: String,
+    ) -> Result<(), Error> {
+        trace!("Confirm platform password reset for {email} with code {alphanumeric_code}");
+
+        let platform_user = match self.db.get_platform_user_by_email(&email) {
+            Ok(Some(user)) => user,
+            Ok(None) => return Err(Error::UserNotFound),
+            Err(_) => return Err(Error::UserNotFound),
+        };
+
+        // Deterministically encrypt the provided alphanumeric code for lookup
+        let secret_key = SecretKey::from_slice(&self.enclave_key)
+            .map_err(|e| Error::EncryptionError(e.to_string()))?;
+        let encrypted_code = encrypt_key_deterministic(&secret_key, alphanumeric_code.as_bytes());
+
+        let reset_request = self
+            .db
+            .get_platform_password_reset_request_by_user_id_and_code(
+                platform_user.uuid,
+                encrypted_code,
+            )?;
+
+        if let Some(reset_request) = reset_request {
+            if reset_request.is_expired() {
+                warn!(
+                    "Platform password reset expired for user: {}",
+                    platform_user.uuid
+                );
+                return Err(Error::PasswordResetExpired);
+            }
+
+            // Hash the plaintext secret again for comparison
+            let hashed_plaintext = generate_reset_hash(plaintext_secret.clone());
+
+            // Compare the hashed values using constant-time comparison
+            if hashed_plaintext
+                .as_bytes()
+                .ct_eq(reset_request.hashed_secret.as_bytes())
+                .into()
+            {
+                // Password verification succeeded, continue with reset
+                // Hash the new password
+                let password_hash = password_auth::generate_hash(new_password.clone());
+
+                // Encrypt the hashed password
+                let secret_key = SecretKey::from_slice(&self.enclave_key)
+                    .map_err(|e| Error::EncryptionError(e.to_string()))?;
+                let encrypted_password =
+                    encrypt_with_key(&secret_key, password_hash.as_bytes()).await;
+
+                // Update the platform user's password
+                self.db
+                    .update_platform_user_password(&platform_user, encrypted_password)?;
+                self.db
+                    .mark_platform_password_reset_as_complete(&reset_request)?;
+
+                // Send confirmation email in the background
+                let user_email = platform_user.email.clone();
+                let app_state = self.clone();
+                spawn(async move {
+                    if let Err(e) = send_platform_password_reset_confirmation_email(
+                        &app_state,
+                        app_state.resend_api_key.clone(),
+                        user_email,
+                    )
+                    .await
+                    {
+                        error!(
+                            "Failed to send platform password reset confirmation email: {:?}",
+                            e
+                        );
+                    }
+                });
+
+                Ok(())
+            } else {
+                warn!(
+                    "Password verification failed for platform user {}. Hashes do not match.",
+                    platform_user.uuid
+                );
+                Err(Error::InvalidPasswordResetSecret)
+            }
+        } else {
+            Err(Error::InvalidPasswordResetRequest)
+        }
+    }
+
     pub async fn update_user_password(
         &self,
         user: &User,
@@ -1054,6 +1220,25 @@ impl AppState {
         // Update the user's password
         self.db
             .update_user_password(user, Some(encrypted_password))
+            .map_err(Error::from)
+    }
+
+    pub async fn update_platform_user_password(
+        &self,
+        user: &PlatformUser,
+        new_password: String,
+    ) -> Result<(), Error> {
+        // Hash the new password
+        let password_hash = password_auth::generate_hash(new_password);
+
+        // Encrypt the hashed password
+        let secret_key = SecretKey::from_slice(&self.enclave_key)
+            .map_err(|e| Error::EncryptionError(e.to_string()))?;
+        let encrypted_password = encrypt_with_key(&secret_key, password_hash.as_bytes()).await;
+
+        // Update the platform user's password
+        self.db
+            .update_platform_user_password(user, encrypted_password)
             .map_err(Error::from)
     }
 
@@ -1076,7 +1261,10 @@ impl AppState {
         // Get the platform user
         let platform_user = match self.db.get_platform_user_by_email(email)? {
             Some(user) => user,
-            None => return Ok(None),
+            None => {
+                warn!("Could not find platform user by email: {email}");
+                return Ok(None);
+            }
         };
 
         // Check if this is an OAuth-only user (no password)
@@ -1085,19 +1273,24 @@ impl AppState {
             return Ok(None);
         }
 
-        // Hash the provided password
-        let password_hash = password_auth::generate_hash(password);
-
-        // Encrypt the hash with enclave key for comparison
-        let secret_key = SecretKey::from_slice(&self.enclave_key)
+        let secret_key = SecretKey::from_slice(&self.enclave_key.clone())
             .map_err(|e| Error::EncryptionError(e.to_string()))?;
-        let encrypted_password = encrypt_with_key(&secret_key, password_hash.as_bytes()).await;
 
-        // Compare the encrypted passwords
-        if platform_user.password_enc.as_ref() == Some(&encrypted_password) {
-            Ok(Some(platform_user))
-        } else {
-            Ok(None)
+        let decrypted_password_bytes =
+            decrypt_with_key(&secret_key, platform_user.password_enc.as_ref().unwrap())
+                .map_err(|e| Error::EncryptionError(e.to_string()))?;
+
+        let decrypted_password_hash = String::from_utf8(decrypted_password_bytes)
+            .map_err(|e| Error::EncryptionError(format!("Failed to decode UTF-8: {}", e)))?;
+
+        // Verifying the password is blocking and potentially slow, so we'll do so via
+        // `spawn_blocking`.
+        let res = task::spawn_blocking(move || verify_password(password, &decrypted_password_hash))
+            .await?;
+
+        match res {
+            Ok(_) => Ok(Some(platform_user)),
+            Err(_) => Ok(None),
         }
     }
 
@@ -1948,8 +2141,8 @@ async fn main() -> Result<(), Error> {
     .await?;
 
     let cors = CorsLayer::new()
-        // allow `GET` and `POST` when accessing the resource
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+        // allow all method types
+        .allow_methods(Any)
         // allow all headers
         .allow_headers(Any)
         // allow requests from any origin
@@ -1965,12 +2158,11 @@ async fn main() -> Result<(), Error> {
         )
         .merge(attestation_routes::router(app_state.clone()))
         .merge(oauth_routes(app_state.clone()))
-        // Temporarily disabled platform routes
-        // .merge(platform_login_routes(app_state.clone()))
-        // .merge(
-        //     platform_org_routes(app_state.clone())
-        //         .route_layer(from_fn_with_state(app_state.clone(), validate_platform_jwt)),
-        // )
+        .merge(platform_login_routes(app_state.clone()))
+        .merge(
+            platform_routes(app_state.clone())
+                .route_layer(from_fn_with_state(app_state.clone(), validate_platform_jwt)),
+        )
         .layer(cors);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")

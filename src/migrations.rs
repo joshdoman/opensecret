@@ -1,6 +1,6 @@
 use crate::models::org_project_secrets::NewOrgProjectSecret;
 use crate::models::project_settings::{EmailSettings, OAuthProviderSettings, OAuthSettings};
-use crate::web::platform::org_routes::{
+use crate::web::platform::{
     PROJECT_GITHUB_OAUTH_SECRET, PROJECT_GOOGLE_OAUTH_SECRET, PROJECT_RESEND_API_KEY,
 };
 use crate::{AppMode, AppState, Error};
@@ -8,6 +8,7 @@ use secp256k1::SecretKey;
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
+// TODO remove migration code now that this ran successfully
 pub async fn run_migrations(
     app_state: &Arc<AppState>,
     github_client_secret: Option<String>,

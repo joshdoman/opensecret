@@ -399,9 +399,9 @@ pub async fn send_platform_verification_email(
 
     let base_url = match app_state.app_mode {
         AppMode::Local => "http://localhost:5173",
-        AppMode::Dev => "https://dev.secretgpt.ai",
-        AppMode::Preview => "https://opensecret.cloud",
-        AppMode::Prod => "https://trymaple.ai",
+        AppMode::Dev => "https://dev.opensecret.cloud",
+        AppMode::Preview => "https://preview.opensecret.cloud",
+        AppMode::Prod => "https://app.opensecret.cloud",
         AppMode::Custom(_) => "https://preview.opensecret.cloud",
     };
 
@@ -461,8 +461,9 @@ pub async fn send_platform_invite_email(
     to_email: String,
     organization_name: String,
     invite_code: Uuid,
+    org_id: Uuid,
 ) -> Result<(), EmailError> {
-    tracing::debug!("Entering send_invite_email");
+    tracing::debug!("Entering send_platform_invite_email");
     if resend_api_key.is_none() {
         return Err(EmailError::ApiKeyNotFound);
     }
@@ -476,13 +477,13 @@ pub async fn send_platform_invite_email(
 
     let base_url = match app_mode {
         AppMode::Local => "http://localhost:5173",
-        AppMode::Dev => "https://dev.secretgpt.ai",
-        AppMode::Preview => "https://opensecret.cloud",
-        AppMode::Prod => "https://trymaple.ai",
+        AppMode::Dev => "https://dev.opensecret.cloud",
+        AppMode::Preview => "https://preview.opensecret.cloud",
+        AppMode::Prod => "https://app.opensecret.cloud",
         AppMode::Custom(_) => "https://preview.opensecret.cloud",
     };
 
-    let invite_url = format!("{}/join/{}", base_url, invite_code);
+    let invite_url = format!("{}/invite/orgs/{}/code/{}", base_url, org_id, invite_code);
 
     let html_content = format!(
         r#"
@@ -528,17 +529,153 @@ pub async fn send_platform_invite_email(
         EmailError::UnknownError
     });
 
-    tracing::debug!("Exiting send_invite_email");
+    tracing::debug!("Exiting send_platform_invite_email");
     Ok(())
 }
 
 fn from_opensecret_email(app_mode: AppMode) -> String {
-    // TODO change these to opensecret domains and only use for platform
     match app_mode {
-        AppMode::Local => "local@email.trymaple.ai".to_string(),
-        AppMode::Dev => "dev@email.trymaple.ai".to_string(),
-        AppMode::Preview => "preview@email.trymaple.ai".to_string(),
-        AppMode::Prod => "hello@email.trymaple.ai".to_string(),
-        AppMode::Custom(_) => "preview@email.trymaple.ai".to_string(),
+        AppMode::Local => "local@email.opensecret.cloud".to_string(),
+        AppMode::Dev => "dev@email.opensecret.cloud".to_string(),
+        AppMode::Preview => "preview@email.opensecret.cloud".to_string(),
+        AppMode::Prod => "hello@email.opensecret.cloud".to_string(),
+        AppMode::Custom(_) => "preview@email.opensecret.cloud".to_string(),
     }
+}
+
+pub async fn send_platform_password_reset_email(
+    app_state: &crate::AppState,
+    resend_api_key: Option<String>,
+    to_email: String,
+    alphanumeric_code: String,
+) -> Result<(), EmailError> {
+    tracing::debug!("Entering send_platform_password_reset_email");
+
+    if resend_api_key.is_none() {
+        return Err(EmailError::ApiKeyNotFound);
+    }
+    let api_key = resend_api_key.expect("just checked");
+
+    let resend = Resend::new(&api_key);
+
+    let to = [to_email];
+    let from_email = from_opensecret_email(app_state.app_mode.clone());
+    let subject = "Reset Your OpenSecret Platform Password";
+
+    let base_url = match app_state.app_mode {
+        AppMode::Local => "http://localhost:5173",
+        AppMode::Dev => "https://dev.opensecret.cloud",
+        AppMode::Preview => "https://preview.opensecret.cloud",
+        AppMode::Prod => "https://app.opensecret.cloud",
+        AppMode::Custom(_) => "https://preview.opensecret.cloud",
+    };
+
+    let reset_url = format!(
+        "{}/platform/reset-password?code={}",
+        base_url, alphanumeric_code
+    );
+
+    let html_content = format!(
+        r#"
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Reset Your OpenSecret Platform Password</title>
+            <style>
+                body {{ font-family: ui-sans-serif,system-ui,sans-serif; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                h1, h2, h3 {{ font-weight: 300; }}
+                .button {{ display: inline-block; padding: 10px 20px; background-color: black; color: #ffffff; text-decoration: none; border-radius: 5px; }}
+                .code {{ background-color: rgba(1,1,1,0.05); padding: 10px; border-radius: 5px; font-family: monospace; font-size: 16px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Password Reset Request</h1>
+                <p>You recently requested to reset your password for your OpenSecret Platform account. Use the code below to complete the process:</p>
+                <p class="code">{}</p>
+                <p>Alternatively, you can click the button below to continue:</p>
+                <p>
+                    <a href="{}" class="button">Reset Password</a>
+                </p>
+                <p>If you did not request a password reset, please ignore this email or contact support if you have questions.</p>
+                <p>This password reset link and code will expire in 24 hours.</p>
+                <p>Best regards,<br>The OpenSecret Team</p>
+            </div>
+        </body>
+        </html>
+        "#,
+        alphanumeric_code, reset_url
+    );
+
+    let email = CreateEmailBaseOptions::new(from_email, to, subject).with_html(&html_content);
+
+    let _email = resend.emails.send(email).await.map_err(|e| {
+        tracing::error!("Failed to send email: {}", e);
+        EmailError::UnknownError
+    });
+
+    tracing::debug!("Exiting send_platform_password_reset_email");
+    Ok(())
+}
+
+pub async fn send_platform_password_reset_confirmation_email(
+    app_state: &crate::AppState,
+    resend_api_key: Option<String>,
+    to_email: String,
+) -> Result<(), EmailError> {
+    tracing::debug!("Entering send_platform_password_reset_confirmation_email");
+
+    if resend_api_key.is_none() {
+        return Err(EmailError::ApiKeyNotFound);
+    }
+    let api_key = resend_api_key.expect("just checked");
+
+    let resend = Resend::new(&api_key);
+
+    let to = [to_email];
+    let from_email = from_opensecret_email(app_state.app_mode.clone());
+    let subject = "Your OpenSecret Platform Password Has Been Reset";
+
+    let html_content = r#"
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Password Reset Confirmation</title>
+            <style>
+                body { font-family: ui-sans-serif,system-ui,sans-serif; }
+                .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+                h1, h2, h3 { font-weight: 300; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Password Reset Confirmation</h1>
+                <p>Your OpenSecret Platform account password has been successfully reset.</p>
+                <p>If you did not initiate this password reset, please contact us immediately at <a href="mailto:support@opensecret.cloud">support@opensecret.cloud</a>.</p>
+                <p>For security reasons, we recommend that you:</p>
+                <ul>
+                    <li>Change your password again if you suspect any unauthorized access.</li>
+                    <li>Review your account activity for any suspicious actions.</li>
+                </ul>
+                <p>If you have any questions or concerns, please don't hesitate to reach out to our support team.</p>
+                <p>Best regards,<br>The OpenSecret Team</p>
+            </div>
+        </body>
+        </html>
+        "#.to_string();
+
+    let email = CreateEmailBaseOptions::new(from_email, to, subject).with_html(&html_content);
+
+    let _email = resend.emails.send(email).await.map_err(|e| {
+        tracing::error!("Failed to send email: {}", e);
+        EmailError::UnknownError
+    });
+
+    tracing::debug!("Exiting send_platform_password_reset_confirmation_email");
+    Ok(())
 }

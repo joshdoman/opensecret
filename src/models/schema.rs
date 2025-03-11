@@ -107,6 +107,39 @@ diesel::table! {
 }
 
 diesel::table! {
+    platform_email_verifications (id) {
+        id -> Int4,
+        platform_user_id -> Uuid,
+        verification_code -> Uuid,
+        is_verified -> Bool,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+        expires_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    platform_invite_codes (id) {
+        id -> Int4,
+        code -> Uuid,
+    }
+}
+
+diesel::table! {
+    platform_password_reset_requests (id) {
+        id -> Int4,
+        platform_user_id -> Uuid,
+        #[max_length = 255]
+        hashed_secret -> Varchar,
+        encrypted_code -> Bytea,
+        expiration_time -> Timestamptz,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+        is_reset -> Bool,
+    }
+}
+
+diesel::table! {
     platform_users (id) {
         id -> Int4,
         uuid -> Uuid,
@@ -198,6 +231,9 @@ diesel::allow_tables_to_appear_in_same_query!(
     org_projects,
     orgs,
     password_reset_requests,
+    platform_email_verifications,
+    platform_invite_codes,
+    platform_password_reset_requests,
     platform_users,
     project_settings,
     token_usage,

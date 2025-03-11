@@ -1,4 +1,4 @@
-use crate::models::schema::org_memberships;
+use crate::models::schema::{org_memberships, platform_users};
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,32 @@ impl From<String> for OrgRole {
     }
 }
 
+impl From<&String> for OrgRole {
+    fn from(s: &String) -> Self {
+        match s.to_lowercase().as_str() {
+            "owner" => OrgRole::Owner,
+            "admin" => OrgRole::Admin,
+            "developer" => OrgRole::Developer,
+            "viewer" => OrgRole::Viewer,
+            _ => OrgRole::Viewer, // Default to lowest privilege
+        }
+    }
+}
+
+impl TryFrom<&str> for OrgRole {
+    type Error = String;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s.to_lowercase().as_str() {
+            "owner" => Ok(OrgRole::Owner),
+            "admin" => Ok(OrgRole::Admin),
+            "developer" => Ok(OrgRole::Developer),
+            "viewer" => Ok(OrgRole::Viewer),
+            _ => Err(format!("Invalid role: {}", s)),
+        }
+    }
+}
+
 #[derive(Queryable, Identifiable, AsChangeset, Serialize, Deserialize, Clone, Debug)]
 #[diesel(table_name = org_memberships)]
 pub struct OrgMembership {
@@ -53,6 +79,19 @@ pub struct OrgMembership {
     pub role: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Queryable)]
+pub struct OrgMembershipWithUser {
+    // OrgMembership fields
+    pub id: i32,
+    pub platform_user_id: Uuid,
+    pub org_id: i32,
+    pub role: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    // PlatformUser fields
+    pub user_name: Option<String>,
 }
 
 // Custom serialization for role field
@@ -101,6 +140,31 @@ impl OrgMembership {
             .map_err(OrgMembershipError::DatabaseError)
     }
 
+    pub fn get_by_platform_user_and_org_with_user(
+        conn: &mut PgConnection,
+        lookup_platform_user_id: Uuid,
+        lookup_org_id: i32,
+    ) -> Result<OrgMembershipWithUser, OrgMembershipError> {
+        org_memberships::table
+            .inner_join(
+                platform_users::table
+                    .on(platform_users::uuid.eq(org_memberships::platform_user_id)),
+            )
+            .filter(org_memberships::platform_user_id.eq(lookup_platform_user_id))
+            .filter(org_memberships::org_id.eq(lookup_org_id))
+            .select((
+                org_memberships::id,
+                org_memberships::platform_user_id,
+                org_memberships::org_id,
+                org_memberships::role,
+                org_memberships::created_at,
+                org_memberships::updated_at,
+                platform_users::name,
+            ))
+            .first::<OrgMembershipWithUser>(conn)
+            .map_err(OrgMembershipError::DatabaseError)
+    }
+
     pub fn get_all_for_platform_user(
         conn: &mut PgConnection,
         lookup_platform_user_id: Uuid,
@@ -118,6 +182,30 @@ impl OrgMembership {
         org_memberships::table
             .filter(org_memberships::org_id.eq(lookup_org_id))
             .load::<OrgMembership>(conn)
+            .map_err(OrgMembershipError::DatabaseError)
+    }
+
+    pub fn get_all_with_users_for_org(
+        conn: &mut PgConnection,
+        lookup_org_id: i32,
+    ) -> Result<Vec<OrgMembershipWithUser>, OrgMembershipError> {
+        // Join org_memberships with platform_users to get the names in a single query
+        org_memberships::table
+            .inner_join(
+                platform_users::table
+                    .on(platform_users::uuid.eq(org_memberships::platform_user_id)),
+            )
+            .filter(org_memberships::org_id.eq(lookup_org_id))
+            .select((
+                org_memberships::id,
+                org_memberships::platform_user_id,
+                org_memberships::org_id,
+                org_memberships::role,
+                org_memberships::created_at,
+                org_memberships::updated_at,
+                platform_users::name,
+            ))
+            .load::<OrgMembershipWithUser>(conn)
             .map_err(OrgMembershipError::DatabaseError)
     }
 
@@ -142,7 +230,7 @@ impl OrgMembership {
     }
 
     pub fn get_role(&self) -> OrgRole {
-        self.role.clone().into()
+        (&self.role).into()
     }
 
     pub fn update_role_with_owner_check(
@@ -153,14 +241,17 @@ impl OrgMembership {
         // Start transaction
         conn.transaction(|conn| {
             // If changing from owner role, check if this is the last owner
-            if membership.role == OrgRole::Owner.as_str() && new_role != OrgRole::Owner {
-                // Lock the memberships for this org to prevent concurrent modifications
-                let owner_count: i64 = org_memberships::table
+            let current_role: OrgRole = (&membership.role).into();
+            if current_role == OrgRole::Owner && new_role != OrgRole::Owner {
+                // First, get all owner memberships with FOR UPDATE lock
+                let owner_memberships = org_memberships::table
                     .filter(org_memberships::org_id.eq(membership.org_id))
                     .filter(org_memberships::role.eq(OrgRole::Owner.as_str()))
                     .for_update() // This locks the rows
-                    .count()
-                    .get_result(conn)?;
+                    .load::<OrgMembership>(conn)?;
+
+                // Then count them
+                let owner_count = owner_memberships.len() as i64;
 
                 if owner_count <= 1 {
                     return Err(OrgMembershipError::DatabaseError(
@@ -190,14 +281,17 @@ impl OrgMembership {
         // Start transaction
         conn.transaction(|conn| {
             // If deleting an owner, check if this is the last owner
-            if membership.role == OrgRole::Owner.as_str() {
-                // Lock the memberships for this org to prevent concurrent modifications
-                let owner_count: i64 = org_memberships::table
+            let current_role: OrgRole = (&membership.role).into();
+            if current_role == OrgRole::Owner {
+                // First, get all owner memberships with FOR UPDATE lock
+                let owner_memberships = org_memberships::table
                     .filter(org_memberships::org_id.eq(membership.org_id))
                     .filter(org_memberships::role.eq(OrgRole::Owner.as_str()))
                     .for_update() // This locks the rows
-                    .count()
-                    .get_result(conn)?;
+                    .load::<OrgMembership>(conn)?;
+
+                // Then count them
+                let owner_count = owner_memberships.len() as i64;
 
                 if owner_count <= 1 {
                     return Err(OrgMembershipError::DatabaseError(

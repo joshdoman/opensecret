@@ -4,7 +4,7 @@ use crate::models::oauth::{
     NewOAuthProvider, NewUserOAuthConnection, OAuthError, OAuthProvider, UserOAuthConnection,
 };
 use crate::models::org_memberships::NewOrgMembership;
-use crate::models::org_memberships::{OrgMembership, OrgMembershipError};
+use crate::models::org_memberships::{OrgMembership, OrgMembershipError, OrgMembershipWithUser};
 use crate::models::org_project_secrets::{
     NewOrgProjectSecret, OrgProjectSecret, OrgProjectSecretError,
 };
@@ -12,6 +12,13 @@ use crate::models::org_projects::{NewOrgProject, OrgProject, OrgProjectError};
 use crate::models::orgs::{NewOrg, Org, OrgError};
 use crate::models::password_reset::{
     NewPasswordResetRequest, PasswordResetError, PasswordResetRequest,
+};
+use crate::models::platform_email_verification::{
+    NewPlatformEmailVerification, PlatformEmailVerification, PlatformEmailVerificationError,
+};
+use crate::models::platform_invite_codes::{PlatformInviteCode, PlatformInviteCodeError};
+use crate::models::platform_password_reset::{
+    NewPlatformPasswordResetRequest, PlatformPasswordResetError, PlatformPasswordResetRequest,
 };
 use crate::models::platform_users::{NewPlatformUser, PlatformUser, PlatformUserError};
 use crate::models::project_settings::OAuthSettings;
@@ -75,10 +82,24 @@ pub enum DBError {
     InviteCodeError(#[from] InviteCodeError),
     #[error("Invite code not found")]
     InviteCodeNotFound,
+    #[error("Platform invite code error: {0}")]
+    PlatformInviteCodeError(#[from] PlatformInviteCodeError),
+    #[error("Platform invite code not found")]
+    PlatformInviteCodeNotFound,
+    #[error("Invalid invite code")]
+    InvalidInviteCode,
     #[error("Platform user error: {0}")]
     PlatformUserError(#[from] PlatformUserError),
     #[error("Platform user not found")]
     PlatformUserNotFound,
+    #[error("Platform email verification error: {0}")]
+    PlatformEmailVerificationError(#[from] PlatformEmailVerificationError),
+    #[error("Platform email verification not found")]
+    PlatformEmailVerificationNotFound,
+    #[error("Platform password reset error: {0}")]
+    PlatformPasswordResetError(#[from] PlatformPasswordResetError),
+    #[error("Platform password reset request not found")]
+    PlatformPasswordResetRequestNotFound,
     #[error("Org membership error: {0}")]
     OrgMembershipError(#[from] OrgMembershipError),
     #[error("Org membership not found")]
@@ -251,11 +272,21 @@ pub trait DBConnection {
         platform_user_id: Uuid,
         org_id: i32,
     ) -> Result<OrgMembership, DBError>;
+
+    fn get_org_membership_by_platform_user_and_org_with_user(
+        &self,
+        platform_user_id: Uuid,
+        org_id: i32,
+    ) -> Result<OrgMembershipWithUser, DBError>;
     fn get_all_org_memberships_for_platform_user(
         &self,
         platform_user_id: Uuid,
     ) -> Result<Vec<OrgMembership>, DBError>;
     fn get_all_org_memberships_for_org(&self, org_id: i32) -> Result<Vec<OrgMembership>, DBError>;
+    fn get_all_org_memberships_with_users_for_org(
+        &self,
+        org_id: i32,
+    ) -> Result<Vec<OrgMembershipWithUser>, DBError>;
     fn update_org_membership(&self, membership: &OrgMembership) -> Result<(), DBError>;
     fn delete_org_membership(&self, membership: &OrgMembership) -> Result<(), DBError>;
     fn update_membership_role(
@@ -313,6 +344,62 @@ pub trait DBConnection {
         project_id: i32,
         settings: OAuthSettings,
     ) -> Result<ProjectSetting, DBError>;
+
+    // Platform email verification methods
+    fn create_platform_email_verification(
+        &self,
+        new_verification: NewPlatformEmailVerification,
+    ) -> Result<PlatformEmailVerification, DBError>;
+
+    fn get_platform_email_verification_by_id(
+        &self,
+        id: i32,
+    ) -> Result<PlatformEmailVerification, DBError>;
+
+    fn get_platform_email_verification_by_platform_user_id(
+        &self,
+        platform_user_id: Uuid,
+    ) -> Result<PlatformEmailVerification, DBError>;
+
+    fn get_platform_email_verification_by_code(
+        &self,
+        code: Uuid,
+    ) -> Result<PlatformEmailVerification, DBError>;
+
+    fn update_platform_email_verification(
+        &self,
+        verification: &PlatformEmailVerification,
+    ) -> Result<(), DBError>;
+
+    fn delete_platform_email_verification(
+        &self,
+        verification: &PlatformEmailVerification,
+    ) -> Result<(), DBError>;
+
+    fn verify_platform_email(
+        &self,
+        verification: &mut PlatformEmailVerification,
+    ) -> Result<(), DBError>;
+
+    // Platform password reset methods
+    fn create_platform_password_reset_request(
+        &self,
+        new_request: NewPlatformPasswordResetRequest,
+    ) -> Result<PlatformPasswordResetRequest, DBError>;
+
+    fn get_platform_password_reset_request_by_user_id_and_code(
+        &self,
+        user_id: Uuid,
+        encrypted_code: Vec<u8>,
+    ) -> Result<Option<PlatformPasswordResetRequest>, DBError>;
+
+    fn mark_platform_password_reset_as_complete(
+        &self,
+        request: &PlatformPasswordResetRequest,
+    ) -> Result<(), DBError>;
+
+    // Platform invite code methods
+    fn validate_platform_invite_code(&self, code: Uuid) -> Result<PlatformInviteCode, DBError>;
 }
 
 pub(crate) struct PostgresConnection {
@@ -1025,6 +1112,25 @@ impl DBConnection for PostgresConnection {
         result
     }
 
+    fn get_org_membership_by_platform_user_and_org_with_user(
+        &self,
+        platform_user_id: Uuid,
+        org_id: i32,
+    ) -> Result<OrgMembershipWithUser, DBError> {
+        debug!("Getting org membership with user info by platform user and org");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result =
+            OrgMembership::get_by_platform_user_and_org_with_user(conn, platform_user_id, org_id)
+                .map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!(
+                "Failed to get org membership with user info by platform user and org: {:?}",
+                e
+            );
+        }
+        result
+    }
+
     fn get_all_org_memberships_for_platform_user(
         &self,
         platform_user_id: Uuid,
@@ -1048,6 +1154,22 @@ impl DBConnection for PostgresConnection {
         let result = OrgMembership::get_all_for_org(conn, org_id).map_err(DBError::from);
         if let Err(ref e) = result {
             error!("Failed to get all org memberships for org: {:?}", e);
+        }
+        result
+    }
+
+    fn get_all_org_memberships_with_users_for_org(
+        &self,
+        org_id: i32,
+    ) -> Result<Vec<OrgMembershipWithUser>, DBError> {
+        debug!("Getting all org memberships with users for org");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = OrgMembership::get_all_with_users_for_org(conn, org_id).map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!(
+                "Failed to get all org memberships with users for org: {:?}",
+                e
+            );
         }
         result
     }
@@ -1279,6 +1401,164 @@ impl DBConnection for PostgresConnection {
             // Create new settings
             new_settings.insert(conn).map_err(DBError::from)
         }
+    }
+
+    // Platform email verification implementations
+    fn create_platform_email_verification(
+        &self,
+        new_verification: NewPlatformEmailVerification,
+    ) -> Result<PlatformEmailVerification, DBError> {
+        debug!("Creating new platform email verification");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = new_verification.insert(conn).map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!("Failed to create platform email verification: {:?}", e);
+        }
+        result
+    }
+
+    fn get_platform_email_verification_by_id(
+        &self,
+        id: i32,
+    ) -> Result<PlatformEmailVerification, DBError> {
+        debug!("Getting platform email verification by ID");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = PlatformEmailVerification::get_by_id(conn, id)?
+            .ok_or(DBError::PlatformEmailVerificationNotFound);
+        if let Err(ref e) = result {
+            error!("Failed to get platform email verification by ID: {:?}", e);
+        }
+        result
+    }
+
+    fn get_platform_email_verification_by_platform_user_id(
+        &self,
+        platform_user_id: Uuid,
+    ) -> Result<PlatformEmailVerification, DBError> {
+        debug!("Getting platform email verification by platform user ID");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = PlatformEmailVerification::get_by_platform_user_id(conn, platform_user_id)?
+            .ok_or(DBError::PlatformEmailVerificationNotFound);
+        if let Err(ref e) = result {
+            error!(
+                "Failed to get platform email verification by platform user ID: {:?}",
+                e
+            );
+        }
+        result
+    }
+
+    fn get_platform_email_verification_by_code(
+        &self,
+        code: Uuid,
+    ) -> Result<PlatformEmailVerification, DBError> {
+        debug!("Getting platform email verification by code");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = PlatformEmailVerification::get_by_verification_code(conn, code)?
+            .ok_or(DBError::PlatformEmailVerificationNotFound);
+        if let Err(ref e) = result {
+            error!("Failed to get platform email verification by code: {:?}", e);
+        }
+        result
+    }
+
+    fn update_platform_email_verification(
+        &self,
+        verification: &PlatformEmailVerification,
+    ) -> Result<(), DBError> {
+        debug!("Updating platform email verification");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = verification.update(conn).map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!("Failed to update platform email verification: {:?}", e);
+        }
+        result
+    }
+
+    fn delete_platform_email_verification(
+        &self,
+        verification: &PlatformEmailVerification,
+    ) -> Result<(), DBError> {
+        debug!("Deleting platform email verification");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = verification.delete(conn).map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!("Failed to delete platform email verification: {:?}", e);
+        }
+        result
+    }
+
+    fn verify_platform_email(
+        &self,
+        verification: &mut PlatformEmailVerification,
+    ) -> Result<(), DBError> {
+        debug!("Verifying platform email");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = verification.verify(conn).map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!("Failed to verify platform email: {:?}", e);
+        }
+        result
+    }
+
+    // Platform password reset implementations
+    fn create_platform_password_reset_request(
+        &self,
+        new_request: NewPlatformPasswordResetRequest,
+    ) -> Result<PlatformPasswordResetRequest, DBError> {
+        debug!("Creating new platform password reset request");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = new_request.insert(conn).map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!("Failed to create platform password reset request: {:?}", e);
+        }
+        result
+    }
+
+    fn get_platform_password_reset_request_by_user_id_and_code(
+        &self,
+        user_id: Uuid,
+        encrypted_code: Vec<u8>,
+    ) -> Result<Option<PlatformPasswordResetRequest>, DBError> {
+        debug!("Getting platform password reset request by user_id and encrypted code");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result =
+            PlatformPasswordResetRequest::get_by_user_id_and_code(conn, user_id, &encrypted_code)
+                .map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!("Failed to get platform password reset request: {:?}", e);
+        }
+        result
+    }
+
+    fn mark_platform_password_reset_as_complete(
+        &self,
+        request: &PlatformPasswordResetRequest,
+    ) -> Result<(), DBError> {
+        debug!("Marking platform password reset request as complete");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = request.mark_as_reset(conn).map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!(
+                "Failed to mark platform password reset request as complete: {:?}",
+                e
+            );
+        }
+        result
+    }
+
+    // Platform invite code implementations
+    fn validate_platform_invite_code(&self, code: Uuid) -> Result<PlatformInviteCode, DBError> {
+        debug!("Validating platform invite code");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = PlatformInviteCode::validate_code(conn, code).map_err(|e| match e {
+            PlatformInviteCodeError::InviteCodeNotFound(_) => DBError::PlatformInviteCodeNotFound,
+            _ => DBError::from(e),
+        });
+        if let Err(ref e) = result {
+            error!("Failed to validate platform invite code: {:?}", e);
+        }
+        result
     }
 }
 
