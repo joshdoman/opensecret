@@ -1,6 +1,6 @@
 use crate::{
     email::send_platform_verification_email,
-    jwt::{NewToken, TokenType},
+    jwt::{NewToken, TokenType, PLATFORM_REFRESH},
     models::{
         org_memberships::OrgRole, platform_email_verification::NewPlatformEmailVerification,
         platform_users::NewPlatformUser,
@@ -365,7 +365,7 @@ pub async fn refresh_platform_token(
     }
 
     let claims =
-        crate::jwt::validate_token(&refresh_request.refresh_token, &data, "platform_refresh")?;
+        crate::jwt::validate_token(&refresh_request.refresh_token, &data, PLATFORM_REFRESH)?;
     let platform_user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::InvalidJwt)?;
 
     // Verify platform user still exists

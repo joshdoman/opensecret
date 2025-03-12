@@ -156,7 +156,7 @@ pub struct ConvertGuestRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ThirdPartyTokenRequest {
-    pub audience: String,
+    pub audience: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -781,23 +781,27 @@ pub async fn generate_third_party_token(
 ) -> Result<Json<EncryptedResponse<ThirdPartyTokenResponse>>, ApiError> {
     debug!("Entering generate_third_party_token function");
     info!(
-        "Generating third party token for user {} with audience {}",
+        "Generating third party token for user {} with audience {:?}",
         user.uuid, request.audience
     );
 
     // Validate the audience URL
-    if url::Url::parse(&request.audience).is_err() {
-        error!("Invalid audience URL provided: {}", request.audience);
-        return Err(ApiError::BadRequest);
+    if let Some(audience) = request.audience.as_ref() {
+        if url::Url::parse(audience).is_err() {
+            error!("Invalid audience URL provided: {}", audience);
+            return Err(ApiError::BadRequest);
+        }
     }
 
     debug!("Audience URL validation successful");
 
+    let project = data.db.get_org_project_by_id(user.project_id)?;
+
     let token = match NewToken::new(
         &user,
         TokenType::ThirdParty {
-            aud: request.audience.clone(),
-            azp: "maple".to_string(),
+            aud: request.audience,
+            azp: project.client_id.to_string(),
         },
         &data,
     ) {
