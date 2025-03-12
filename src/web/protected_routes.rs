@@ -164,6 +164,23 @@ pub struct ThirdPartyTokenResponse {
     pub token: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct EncryptDataRequest {
+    pub data: String,
+    pub derivation_path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EncryptDataResponse {
+    pub encrypted_data: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DecryptDataRequest {
+    pub encrypted_data: String,
+    pub derivation_path: Option<String>,
+}
+
 pub fn router(app_state: Arc<AppState>) -> Router<()> {
     Router::new()
         .route(
@@ -236,6 +253,20 @@ pub fn router(app_state: Arc<AppState>) -> Router<()> {
             post(generate_third_party_token).layer(from_fn_with_state(
                 app_state.clone(),
                 decrypt_request::<ThirdPartyTokenRequest>,
+            )),
+        )
+        .route(
+            "/protected/encrypt",
+            post(encrypt_data).layer(from_fn_with_state(
+                app_state.clone(),
+                decrypt_request::<EncryptDataRequest>,
+            )),
+        )
+        .route(
+            "/protected/decrypt",
+            post(decrypt_data).layer(from_fn_with_state(
+                app_state.clone(),
+                decrypt_request::<DecryptDataRequest>,
             )),
         )
         .with_state(app_state.clone())
@@ -787,6 +818,113 @@ pub async fn generate_third_party_token(
 
     debug!("Exiting generate_third_party_token function");
     encrypt_response(&data, &session_id, &response).await
+}
+
+pub async fn encrypt_data(
+    State(data): State<Arc<AppState>>,
+    Extension(user): Extension<User>,
+    Extension(request): Extension<EncryptDataRequest>,
+    Extension(session_id): Extension<Uuid>,
+) -> Result<Json<EncryptedResponse<EncryptDataResponse>>, ApiError> {
+    debug!("Entering encrypt_data function");
+    info!("Encrypting data for user {}", user.uuid);
+
+    // Validate derivation path if present
+    let validation_query = DerivationPathQuery {
+        derivation_path: request.derivation_path.clone(),
+    };
+    validation_query.validate()?;
+
+    // Get the user's key
+    let user_key = data
+        .get_user_key(user.uuid, request.derivation_path.as_deref())
+        .await
+        .map_err(|e| match e {
+            Error::InvalidDerivationPath(msg) => {
+                error!("Invalid derivation path: {}", msg);
+                ApiError::BadRequest
+            }
+            Error::KeyDerivationError(msg) => {
+                error!("Failed to derive key: {}", msg);
+                ApiError::BadRequest
+            }
+            _ => {
+                error!("Failed to get user key: {:?}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+
+    // Encrypt the data
+    let data_bytes = request.data.as_bytes();
+    let encrypted_data = encrypt::encrypt_with_key(&user_key, data_bytes).await;
+
+    // Convert to base64 for easy transport
+    let encrypted_data_base64 = general_purpose::STANDARD.encode(&encrypted_data);
+
+    let response = EncryptDataResponse {
+        encrypted_data: encrypted_data_base64,
+    };
+
+    debug!("Exiting encrypt_data function");
+    encrypt_response(&data, &session_id, &response).await
+}
+
+pub async fn decrypt_data(
+    State(data): State<Arc<AppState>>,
+    Extension(user): Extension<User>,
+    Extension(request): Extension<DecryptDataRequest>,
+    Extension(session_id): Extension<Uuid>,
+) -> Result<Json<EncryptedResponse<String>>, ApiError> {
+    debug!("Entering decrypt_data function");
+    info!("Decrypting data for user {}", user.uuid);
+
+    // Validate derivation path if present
+    let validation_query = DerivationPathQuery {
+        derivation_path: request.derivation_path.clone(),
+    };
+    validation_query.validate()?;
+
+    // Get the user's key
+    let user_key = data
+        .get_user_key(user.uuid, request.derivation_path.as_deref())
+        .await
+        .map_err(|e| match e {
+            Error::InvalidDerivationPath(msg) => {
+                error!("Invalid derivation path: {}", msg);
+                ApiError::BadRequest
+            }
+            Error::KeyDerivationError(msg) => {
+                error!("Failed to derive key: {}", msg);
+                ApiError::BadRequest
+            }
+            _ => {
+                error!("Failed to get user key: {:?}", e);
+                ApiError::InternalServerError
+            }
+        })?;
+
+    // Decode the base64 encrypted data
+    let encrypted_data = general_purpose::STANDARD
+        .decode(&request.encrypted_data)
+        .map_err(|e| {
+            error!("Failed to decode base64 data: {:?}", e);
+            ApiError::BadRequest
+        })?;
+
+    // Decrypt the data
+    let decrypted_data = encrypt::decrypt_with_key(&user_key, &encrypted_data).map_err(|e| {
+        error!("Decryption failed: {:?}", e);
+        ApiError::BadRequest
+    })?;
+
+    // Convert decrypted bytes to string
+    let decrypted_string = String::from_utf8(decrypted_data).map_err(|e| {
+        error!("Failed to convert decrypted data to string: {:?}", e);
+        ApiError::BadRequest
+    })?;
+
+    debug!("Exiting decrypt_data function");
+    encrypt_response(&data, &session_id, &decrypted_string).await
 }
 
 #[cfg(test)]
