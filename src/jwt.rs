@@ -17,17 +17,23 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use uuid::Uuid;
 
-use crate::AppMode;
+use crate::db::DBError;
 use crate::{ApiError, AppState};
 use url::Url;
 
 use crate::models::{platform_users::PlatformUser, users::User};
 
+pub const USER_ACCESS: &str = "access";
+pub const USER_REFRESH: &str = "refresh";
+
+pub const PLATFORM_ACCESS: &str = "platform_access";
+pub const PLATFORM_REFRESH: &str = "platform_refresh";
+
 #[derive(Debug, Clone)]
 pub enum TokenType {
     Access,
     Refresh,
-    ThirdParty { aud: String, azp: String },
+    ThirdParty { aud: Option<String>, azp: String },
 }
 
 #[derive(Debug, Clone)]
@@ -65,65 +71,213 @@ impl JwtKeys {
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct CustomClaims {
     pub sub: String,
-    pub aud: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aud: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub azp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 impl TokenType {
-    pub fn validate_third_party_audience(aud: &str, app_mode: &AppMode) -> Result<(), ApiError> {
-        // Parse the URL first
-        let url = Url::parse(aud).map_err(|_| {
-            tracing::error!("Invalid audience URL format: {}", aud);
+    pub fn validate_third_party_audience(aud: &str) -> Result<(), ApiError> {
+        // Validate third party audience can't use our internal audience types
+        const RESERVED_AUDIENCES: [&str; 4] =
+            [USER_ACCESS, USER_REFRESH, PLATFORM_ACCESS, PLATFORM_REFRESH];
+
+        // 1. Check for reserved audiences
+        if RESERVED_AUDIENCES.contains(&aud) {
+            tracing::error!(
+                "Third-party tokens cannot use internal audience types: {}",
+                aud
+            );
+            return Err(ApiError::BadRequest);
+        }
+
+        // 2. Check length limit (max 50 characters)
+        const MAX_AUDIENCE_LENGTH: usize = 50;
+        if aud.len() > MAX_AUDIENCE_LENGTH {
+            tracing::error!(
+                "Audience value exceeds maximum length of {}: {} (length: {})",
+                MAX_AUDIENCE_LENGTH,
+                aud,
+                aud.len()
+            );
+            return Err(ApiError::BadRequest);
+        }
+
+        // 3. Check for null bytes which can cause issues in some systems
+        if aud.contains('\0') {
+            tracing::error!("Audience contains null bytes which is not allowed");
+            return Err(ApiError::BadRequest);
+        }
+
+        // 4. Check for character set restrictions - only allow alphanumeric, dots, dashes, colons, and slashes
+        // This helps prevent injection attacks while still allowing typical URL characters
+        if !aud.chars().all(|c| {
+            c.is_alphanumeric()
+                || c == '.'
+                || c == '-'
+                || c == ':'
+                || c == '/'
+                || c == '_'
+                || c == '~'
+                || c == '?'
+                || c == '&'
+                || c == '='
+                || c == '+'
+                || c == '%'
+                || c == '#'
+        }) {
+            tracing::error!("Audience contains disallowed characters: {}", aud);
+            return Err(ApiError::BadRequest);
+        }
+
+        // 5. Parse the URL to ensure it's valid
+        let _url = Url::parse(aud).map_err(|e| {
+            tracing::error!("Invalid audience URL format: {}, error: {:?}", aud, e);
             ApiError::BadRequest
         })?;
 
-        // Allow localhost/127.0.0.1/0.0.0.0 in local mode
-        if matches!(app_mode, AppMode::Local) {
-            let host = url.host_str().unwrap_or_default();
-            if host == "localhost" || host == "127.0.0.1" || host == "0.0.0.0" {
-                return Ok(());
-            }
-        }
-
-        // Define allowed production/staging domains
-        const ALLOWED_DOMAINS: [&str; 2] =
-            ["billing.opensecret.cloud", "billing-dev.opensecret.cloud"];
-
-        if ALLOWED_DOMAINS.contains(&url.host_str().unwrap_or_default()) {
-            Ok(())
-        } else {
-            tracing::error!(
-                "Unauthorized audience domain: {}",
-                url.host_str().unwrap_or_default()
-            );
-            Err(ApiError::BadRequest)
-        }
+        Ok(())
     }
 }
 
 impl NewToken {
+    /// Attempts to generate a token for third-party authentication using a project-specific JWT key.
+    /// Falls back to the default JWT key if no project-specific key exists.
+    fn get_third_party_token(
+        azp: &str,
+        app_state: &AppState,
+        header: &Header,
+        claims: &Claims<CustomClaims>,
+    ) -> Result<String, ApiError> {
+        use crate::web::platform::common::THIRD_PARTY_JWT_SECRET;
+
+        // Parse the "azp" value which should be the project client_id
+        let project_client_id = Uuid::parse_str(azp).map_err(|e| {
+            tracing::error!(
+                "Invalid project client_id format in azp: {}, error: {:?}",
+                azp,
+                e
+            );
+            ApiError::BadRequest
+        })?;
+
+        // Look up the project by client_id (not UUID)
+        let project = app_state
+            .db
+            .get_org_project_by_client_id(project_client_id)
+            .map_err(|e| {
+                tracing::error!(
+                    "Error looking up project with client_id {}: {:?}",
+                    project_client_id,
+                    e
+                );
+                match e {
+                    DBError::OrgProjectNotFound => ApiError::BadRequest,
+                    _ => ApiError::InternalServerError,
+                }
+            })?;
+
+        // Look up a custom JWT secret for this project
+        match app_state
+            .db
+            .get_org_project_secret_by_key_name_and_project(THIRD_PARTY_JWT_SECRET, project.id)
+        {
+            Ok(Some(secret)) => {
+                // Decrypt the custom JWT secret using the enclave key
+                let secret_key =
+                    secp256k1::SecretKey::from_slice(&app_state.enclave_key).map_err(|e| {
+                        tracing::error!("Failed to create secret key from enclave key: {:?}", e);
+                        ApiError::InternalServerError
+                    })?;
+
+                let decrypted_key =
+                    crate::encrypt::decrypt_with_key(&secret_key, &secret.secret_enc).map_err(
+                        |e| {
+                            tracing::error!(
+                                "Failed to decrypt custom JWT secret for project {}: {:?}",
+                                project_client_id,
+                                e
+                            );
+                            ApiError::InternalServerError
+                        },
+                    )?;
+
+                // Create a new JwtKeys instance with the custom secret
+                let custom_keys = JwtKeys::new(decrypted_key).map_err(|e| {
+                    tracing::error!(
+                        "Failed to create JWT keys from custom secret for project {}: {:?}",
+                        project_client_id,
+                        e
+                    );
+                    ApiError::InternalServerError
+                })?;
+
+                tracing::debug!("Using custom JWT secret for project {}", project_client_id);
+                let es256k = Es256k::<Sha256>::new(custom_keys.secp.clone());
+
+                es256k
+                    .token(header, claims, &custom_keys.signing_key)
+                    .map_err(|e| {
+                        tracing::error!("Error creating token with custom secret: {:?}", e);
+                        ApiError::InternalServerError
+                    })
+            }
+            Ok(None) => {
+                // No custom secret found, use the default key
+                tracing::debug!(
+                    "No custom JWT secret found for project {}, using default",
+                    project_client_id
+                );
+                let es256k = Es256k::<Sha256>::new(app_state.config.jwt_keys.secp.clone());
+
+                es256k
+                    .token(header, claims, &app_state.config.jwt_keys.signing_key)
+                    .map_err(|e| {
+                        tracing::error!("Error creating token: {:?}", e);
+                        ApiError::InternalServerError
+                    })
+            }
+            Err(e) => {
+                // Database error looking up the secret
+                tracing::error!(
+                    "Database error looking up custom JWT secret for project {}: {:?}",
+                    project_client_id,
+                    e
+                );
+                Err(ApiError::InternalServerError)
+            }
+        }
+    }
+
     pub fn new(user: &User, token_type: TokenType, app_state: &AppState) -> Result<Self, ApiError> {
-        let (aud, azp, duration) = match token_type {
+        let (aud, azp, role, duration) = match &token_type {
             TokenType::Access => (
-                "access".to_string(),
+                Some(USER_ACCESS.to_string()),
+                None,
                 None,
                 Duration::minutes(app_state.config.access_token_maxage),
             ),
             TokenType::Refresh => (
-                "refresh".to_string(),
+                Some(USER_REFRESH.to_string()),
+                None,
                 None,
                 Duration::days(app_state.config.refresh_token_maxage),
             ),
             TokenType::ThirdParty { aud, azp } => {
                 // Validate the audience URL against allowed domains
-                TokenType::validate_third_party_audience(&aud, &app_state.app_mode)?;
-
-                // For now, enforce that azp must be "maple"
-                if azp != "maple" {
-                    return Err(ApiError::BadRequest);
+                if aud.is_some() {
+                    TokenType::validate_third_party_audience(aud.as_ref().expect("just checked"))?;
                 }
-                (aud, Some(azp), Duration::hours(1))
+
+                (
+                    aud.clone(),
+                    Some(azp.clone()),
+                    Some("authenticated".to_string()),
+                    Duration::hours(1),
+                )
             }
         };
 
@@ -131,6 +285,7 @@ impl NewToken {
             sub: user.get_id().to_string(),
             aud,
             azp,
+            role,
         };
 
         tracing::debug!("Creating new token with claims: {:?}", custom_claims);
@@ -141,14 +296,21 @@ impl NewToken {
         // Create header with typ field
         let header = Header::empty().with_token_type("JWT");
 
-        let es256k = Es256k::<Sha256>::new(app_state.config.jwt_keys.secp.clone());
+        // Check if we need to use a custom JWT secret for third-party tokens
+        let token_string = if let TokenType::ThirdParty { azp, .. } = &token_type {
+            // Try to get the third-party token using project-specific key or fall back to default key
+            Self::get_third_party_token(azp, app_state, &header, &claims)?
+        } else {
+            // For normal user tokens, use the default key
+            let es256k = Es256k::<Sha256>::new(app_state.config.jwt_keys.secp.clone());
 
-        let token_string = es256k
-            .token(&header, &claims, &app_state.config.jwt_keys.signing_key)
-            .map_err(|e| {
-                tracing::error!("Error creating token: {:?}", e);
-                ApiError::InternalServerError
-            })?;
+            es256k
+                .token(&header, &claims, &app_state.config.jwt_keys.signing_key)
+                .map_err(|e| {
+                    tracing::error!("Error creating token: {:?}", e);
+                    ApiError::InternalServerError
+                })?
+        };
 
         tracing::debug!("Successfully created token");
 
@@ -164,12 +326,12 @@ impl NewToken {
     ) -> Result<Self, ApiError> {
         let (aud, azp, duration) = match token_type {
             TokenType::Access => (
-                "platform_access".to_string(),
+                PLATFORM_ACCESS.to_string(),
                 None,
                 Duration::minutes(app_state.config.access_token_maxage),
             ),
             TokenType::Refresh => (
-                "platform_refresh".to_string(),
+                PLATFORM_REFRESH.to_string(),
                 None,
                 Duration::days(app_state.config.refresh_token_maxage),
             ),
@@ -181,8 +343,9 @@ impl NewToken {
 
         let custom_claims = CustomClaims {
             sub: user.uuid.to_string(),
-            aud,
+            aud: Some(aud),
             azp,
+            role: None,
         };
 
         tracing::debug!(
@@ -253,7 +416,7 @@ pub async fn validate_jwt(
 
     tracing::trace!("Validating JWT");
 
-    let claims = match validate_token(&token, &data, "access") {
+    let claims = match validate_token(&token, &data, USER_ACCESS) {
         Ok(claims) => claims,
         Err(_) => return ApiError::InvalidJwt.into_response(),
     };
@@ -297,7 +460,7 @@ pub async fn validate_platform_jwt(
 
     tracing::trace!("Validating platform JWT");
 
-    let claims = match validate_token(&token, &data, "platform_access") {
+    let claims = match validate_token(&token, &data, PLATFORM_ACCESS) {
         Ok(claims) => claims,
         Err(_) => return ApiError::InvalidJwt.into_response(),
     };
@@ -357,12 +520,17 @@ pub(crate) fn validate_token(
 
             // Validate audience with proper type annotation
             let claims: &Claims<CustomClaims> = token.claims();
-            if claims.custom.aud != expected_audience {
-                tracing::error!(
-                    "Invalid audience: got {}, expected {}",
-                    claims.custom.aud,
-                    expected_audience
-                );
+            if let Some(audience) = &claims.custom.aud {
+                if audience != expected_audience {
+                    tracing::error!(
+                        "Invalid audience: got {}, expected {}",
+                        audience,
+                        expected_audience
+                    );
+                    return Err(ApiError::InvalidJwt);
+                }
+            } else {
+                tracing::error!("Missing audience in token, expected {}", expected_audience);
                 return Err(ApiError::InvalidJwt);
             }
 

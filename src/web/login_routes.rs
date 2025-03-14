@@ -1,4 +1,3 @@
-use crate::web::encryption_middleware::EncryptedResponse;
 use crate::User;
 use crate::{
     db::DBError,
@@ -6,6 +5,7 @@ use crate::{
     jwt::{validate_token, NewToken, TokenType},
     models::email_verification::NewEmailVerification,
 };
+use crate::{jwt::USER_REFRESH, web::encryption_middleware::EncryptedResponse};
 use crate::{
     web::encryption_middleware::{decrypt_request, encrypt_response},
     Error,
@@ -346,7 +346,7 @@ pub async fn refresh_token(
     debug!("Entering refresh_token function");
     info!("Refresh token request received");
 
-    let claims = validate_token(&refresh_request.refresh_token, &data, "refresh")?;
+    let claims = validate_token(&refresh_request.refresh_token, &data, USER_REFRESH)?;
 
     // Audience check is now handled by validate_token
     let user_id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::InvalidJwt)?;

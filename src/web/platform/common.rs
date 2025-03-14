@@ -12,6 +12,7 @@ use validator::Validate;
 pub const PROJECT_RESEND_API_KEY: &str = "RESEND_API_KEY";
 pub const PROJECT_GOOGLE_OAUTH_SECRET: &str = "GOOGLE_OAUTH_SECRET";
 pub const PROJECT_GITHUB_OAUTH_SECRET: &str = "GITHUB_OAUTH_SECRET";
+pub const THIRD_PARTY_JWT_SECRET: &str = "THIRD_PARTY_JWT_SECRET";
 
 // Request Types
 #[derive(Deserialize, Clone, Validate)]
