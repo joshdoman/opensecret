@@ -1,7 +1,7 @@
 use crate::encrypt;
 use crate::jwt::{NewToken, TokenType};
 use crate::message_signing::SigningAlgorithm;
-use crate::private_key::decrypt_user_seed_to_mnemonic;
+use crate::private_key::{decrypt_user_seed_to_mnemonic, VALID_BIP39_WORD_COUNTS};
 use crate::web::encryption_middleware::{decrypt_request, encrypt_response, EncryptedResponse};
 use crate::Error;
 use crate::KVPair;
@@ -9,6 +9,10 @@ use crate::{
     db::DBError, email::send_verification_email, models::email_verification::NewEmailVerification,
     models::users::User, ApiError, AppState,
 };
+
+// BIP-85 constants
+const BIP85_PURPOSE: u32 = 83696968; // BIP-85 purpose value
+const BIP85_APPLICATION_BIP39: u32 = 39; // Application number for BIP-39 mnemonics
 use axum::middleware::from_fn_with_state;
 use axum::{
     extract::{Path, Query, State},
@@ -83,6 +87,7 @@ pub struct ChangePasswordRequest {
 
 #[derive(Debug, Serialize)]
 pub struct PrivateKeyResponse {
+    /// Root mnemonic or derived mnemonic if BIP-85 path is specified
     mnemonic: String,
 }
 
@@ -95,38 +100,179 @@ pub struct PrivateKeyBytesResponse {
     private_key: String,
 }
 
+/// Structure for key derivation options.
+/// Supports both BIP-32 and BIP-85 derivation paths.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct KeyOptions {
+    /// BIP-85 derivation path to derive a child seed phrase
+    /// Format: "m/83696968'/39'/0'/12'/0'" where:
+    ///   - 83696968' is the BIP-85 purpose
+    ///   - 39' is for BIP-39 mnemonics
+    ///   - 0' is the coin type
+    ///   - 12', 18', or 24' is the word count (only these word counts are supported)
+    ///   - 0' is the index
+    pub seed_phrase_derivation_path: Option<String>,
+
+    /// BIP-32 derivation path for deriving a private key
+    /// Format: "m/44'/0'/0'/0/0"
+    pub private_key_derivation_path: Option<String>,
+}
+
+impl KeyOptions {
+    /// Validates both derivation paths if present.
+    pub fn validate(&self) -> Result<(), ApiError> {
+        // Validate private_key_derivation_path if present
+        if let Some(ref path) = self.private_key_derivation_path {
+            validate_path(path)?;
+        }
+
+        // Validate seed_phrase_derivation_path if present
+        if let Some(ref path) = self.seed_phrase_derivation_path {
+            validate_path(path)?;
+            validate_bip85_path(path)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Validates a BIP-85 path to ensure it follows the correct format and contains valid values.
+/// Format: m/PURPOSE'/APP'/LANGUAGE'/WORDS'/INDEX' where:
+/// - PURPOSE' is the BIP-85 purpose value (BIP85_PURPOSE = 83696968', must be hardened)
+/// - APP' is for BIP-39 mnemonics (BIP85_APPLICATION_BIP39 = 39', must be hardened)
+/// - LANGUAGE' is typically 0' for English (must be hardened)
+/// - WORDS' must be one of VALID_BIP39_WORD_COUNTS (12', 18', 24', must be hardened)
+/// - INDEX' is the derivation index (must be hardened)
+pub fn validate_bip85_path(path: &str) -> Result<(), ApiError> {
+    // Split the path into segments
+    let segments: Vec<&str> = path.split('/').collect();
+
+    // Path must have exactly 6 segments: m/PURPOSE'/APP'/LANGUAGE'/WORDS'/INDEX'
+    if segments.len() != 6 {
+        error!("BIP-85 path must have exactly 6 segments: {}", path);
+        return Err(ApiError::BadRequest);
+    }
+
+    // First segment should be "m" (master key)
+    if segments[0] != "m" {
+        error!("BIP-85 path must start with 'm': {}", path);
+        return Err(ApiError::BadRequest);
+    }
+
+    // Check purpose is BIP85_PURPOSE (83696968')
+    let purpose = segments[1];
+    if !purpose.starts_with(&BIP85_PURPOSE.to_string())
+        || !(purpose.ends_with('\'') || purpose.ends_with('h'))
+    {
+        error!(
+            "BIP-85 path purpose must be {}' or {}h: {}",
+            BIP85_PURPOSE, BIP85_PURPOSE, path
+        );
+        return Err(ApiError::BadRequest);
+    }
+
+    // Check application is BIP85_APPLICATION_BIP39 (39' for BIP-39 mnemonic)
+    let application = segments[2];
+    if !application.starts_with(&BIP85_APPLICATION_BIP39.to_string())
+        || !(application.ends_with('\'') || application.ends_with('h'))
+    {
+        error!(
+            "BIP-85 path application must be {}' or {}h for BIP-39 mnemonics: {}",
+            BIP85_APPLICATION_BIP39, BIP85_APPLICATION_BIP39, path
+        );
+        return Err(ApiError::BadRequest);
+    }
+
+    // Check language is hardened
+    let language = segments[3];
+    if !(language.ends_with('\'') || language.ends_with('h')) {
+        error!("BIP-85 path language must be hardened: {}", path);
+        return Err(ApiError::BadRequest);
+    }
+
+    // Check word count is valid (12, 18, 24) and hardened
+    let word_count = segments[4];
+    let word_count_value = match word_count.trim_end_matches(&['\'', 'h'][..]).parse::<u32>() {
+        Ok(value) => value,
+        Err(_) => {
+            error!("BIP-85 path word count must be a number: {}", path);
+            return Err(ApiError::BadRequest);
+        }
+    };
+
+    // Validate word count is one of the valid options
+    if !VALID_BIP39_WORD_COUNTS.contains(&word_count_value) {
+        error!(
+            "BIP-85 path word count must be one of {:?}: {}",
+            VALID_BIP39_WORD_COUNTS, path
+        );
+        return Err(ApiError::BadRequest);
+    }
+
+    // Check word count is hardened
+    if !(word_count.ends_with('\'') || word_count.ends_with('h')) {
+        error!("BIP-85 path word count must be hardened: {}", path);
+        return Err(ApiError::BadRequest);
+    }
+
+    // Check index is hardened
+    let index = segments[5];
+    if !(index.ends_with('\'') || index.ends_with('h')) {
+        error!("BIP-85 path index must be hardened: {}", path);
+        return Err(ApiError::BadRequest);
+    }
+
+    // Try to parse the index to ensure it's a valid number
+    if index
+        .trim_end_matches(&['\'', 'h'][..])
+        .parse::<u32>()
+        .is_err()
+    {
+        error!("BIP-85 path index must be a valid number: {}", path);
+        return Err(ApiError::BadRequest);
+    }
+
+    Ok(())
+}
+
 /// Query parameters for endpoints that accept a derivation path.
 /// The derivation path should follow BIP32 format (e.g., "m/44'/0'/0'/0/0").
 #[derive(Debug, Clone, Deserialize)]
 pub struct DerivationPathQuery {
-    derivation_path: Option<String>,
+    #[serde(default)]
+    pub key_options: KeyOptions,
 }
 
 impl DerivationPathQuery {
-    /// Validates that the derivation path follows BIP32 format if present.
-    /// Both absolute (starting with "m/") and relative paths are valid.
+    /// Validates that the derivation paths follow BIP32 and BIP-85 format if present.
     pub fn validate(&self) -> Result<(), ApiError> {
-        if let Some(ref path) = self.derivation_path {
-            // Allow empty path or "m" alone
-            if path.is_empty() || path == "m" {
-                return Ok(());
-            }
-
-            // For non-empty paths, validate using bitcoin library's DerivationPath
-            DerivationPath::from_str(path).map_err(|e| {
-                error!("Invalid derivation path format: {}", e);
-                ApiError::BadRequest
-            })?;
-        }
-        Ok(())
+        // Use the KeyOptions validation
+        self.key_options.validate()
     }
+}
+
+/// Helper function to validate a derivation path
+fn validate_path(path: &str) -> Result<(), ApiError> {
+    // Allow empty path or "m" alone
+    if path.is_empty() || path == "m" {
+        return Ok(());
+    }
+
+    // For non-empty paths, validate using bitcoin library's DerivationPath
+    DerivationPath::from_str(path).map_err(|e| {
+        error!("Invalid derivation path format: {}", e);
+        ApiError::BadRequest
+    })?;
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SignMessageRequest {
     pub message_base64: String,
     pub algorithm: SigningAlgorithm,
-    pub derivation_path: Option<String>,
+    #[serde(default)]
+    pub key_options: KeyOptions,
 }
 
 #[derive(Debug, Serialize)]
@@ -144,7 +290,8 @@ pub struct PublicKeyResponseJson {
 #[derive(Debug, Deserialize)]
 pub struct PublicKeyQuery {
     algorithm: SigningAlgorithm,
-    derivation_path: Option<String>,
+    #[serde(default)]
+    key_options: KeyOptions,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -167,7 +314,8 @@ pub struct ThirdPartyTokenResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct EncryptDataRequest {
     pub data: String,
-    pub derivation_path: Option<String>,
+    #[serde(default)]
+    pub key_options: KeyOptions,
 }
 
 #[derive(Debug, Serialize)]
@@ -178,7 +326,8 @@ pub struct EncryptDataResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DecryptDataRequest {
     pub encrypted_data: String,
-    pub derivation_path: Option<String>,
+    #[serde(default)]
+    pub key_options: KeyOptions,
 }
 
 pub fn router(app_state: Arc<AppState>) -> Router<()> {
@@ -220,8 +369,10 @@ pub fn router(app_state: Arc<AppState>) -> Router<()> {
         )
         .route(
             "/protected/private_key",
-            get(get_private_key)
-                .layer(from_fn_with_state(app_state.clone(), decrypt_request::<()>)),
+            get(get_private_key).layer(from_fn_with_state(
+                app_state.clone(),
+                decrypt_request::<DerivationPathQuery>,
+            )),
         )
         .route(
             "/protected/private_key_bytes",
@@ -349,6 +500,7 @@ pub async fn get_kv(
     Path(key): Path<String>,
 ) -> Result<Json<EncryptedResponse<Option<String>>>, ApiError> {
     debug!("Entering get_kv function");
+
     let value = match data.get(user.uuid, key).await {
         Ok(kv) => kv,
         Err(e) => {
@@ -390,6 +542,7 @@ pub async fn delete_kv(
     Path(key): Path<String>,
 ) -> Result<Json<EncryptedResponse<serde_json::Value>>, ApiError> {
     debug!("Entering delete_kv function");
+
     match data.delete(user.uuid, key).await {
         Ok(_) => {
             let response = json!({ "message": "Resource deleted successfully" });
@@ -409,6 +562,7 @@ pub async fn list_kv(
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<Vec<KVPair>>>, ApiError> {
     debug!("Entering list_kv function");
+
     let kvs = match data.list(user.uuid).await {
         Ok(kvs) => kvs,
         Err(e) => {
@@ -540,8 +694,12 @@ pub async fn get_private_key(
     State(data): State<Arc<AppState>>,
     Extension(user): Extension<User>,
     Extension(session_id): Extension<Uuid>,
+    Query(query): Query<DerivationPathQuery>,
 ) -> Result<Json<EncryptedResponse<PrivateKeyResponse>>, ApiError> {
     debug!("Entering get_private_key function");
+
+    // Validate paths if present
+    query.validate()?;
 
     // First try to get the existing encrypted seed
     let encrypted_seed = match user.get_seed_encrypted().await {
@@ -564,19 +722,40 @@ pub async fn get_private_key(
         }
     };
 
-    // Decrypt the seed to get the mnemonic
-    let mnemonic = decrypt_user_seed_to_mnemonic(data.enclave_key.clone(), encrypted_seed)
+    // Check if BIP-85 derivation is requested
+    if let Some(bip85_path) = &query.key_options.seed_phrase_derivation_path {
+        // Derive a child mnemonic
+        let child_mnemonic = crate::private_key::decrypt_and_derive_bip85_mnemonic(
+            data.enclave_key.clone(),
+            encrypted_seed,
+            bip85_path,
+        )
         .map_err(|e| {
-            error!("Failed to decrypt user seed: {:?}", e);
-            ApiError::InternalServerError
+            error!("BIP-85 derivation error: {:?}", e);
+            ApiError::BadRequest
         })?;
 
-    let response = PrivateKeyResponse {
-        mnemonic: mnemonic.to_string(),
-    };
+        let response = PrivateKeyResponse {
+            mnemonic: child_mnemonic.to_string(),
+        };
 
-    debug!("Exiting get_private_key function");
-    encrypt_response(&data, &session_id, &response).await
+        debug!("Exiting get_private_key function with derived mnemonic");
+        encrypt_response(&data, &session_id, &response).await
+    } else {
+        // Return root mnemonic
+        let mnemonic = decrypt_user_seed_to_mnemonic(data.enclave_key.clone(), encrypted_seed)
+            .map_err(|e| {
+                error!("Failed to decrypt user seed: {:?}", e);
+                ApiError::InternalServerError
+            })?;
+
+        let response = PrivateKeyResponse {
+            mnemonic: mnemonic.to_string(),
+        };
+
+        debug!("Exiting get_private_key function with root mnemonic");
+        encrypt_response(&data, &session_id, &response).await
+    }
 }
 
 pub async fn get_private_key_bytes(
@@ -590,8 +769,13 @@ pub async fn get_private_key_bytes(
     // Validate derivation path if present
     query.validate()?;
 
+    // Use the method that supports both BIP-85 and BIP-32 derivation
     let secret_key = data
-        .get_user_key(user.uuid, query.derivation_path.as_deref())
+        .get_user_key(
+            user.uuid,
+            query.key_options.private_key_derivation_path.as_deref(),
+            query.key_options.seed_phrase_derivation_path.as_deref(),
+        )
         .await
         .map_err(|e| match e {
             Error::InvalidDerivationPath(msg) => {
@@ -624,6 +808,22 @@ pub async fn sign_message(
 ) -> Result<Json<EncryptedResponse<SignMessageResponseJson>>, ApiError> {
     debug!("Entering sign_message function");
 
+    // Validate key_options
+    let validation_query = DerivationPathQuery {
+        key_options: sign_request.key_options.clone(),
+    };
+    validation_query.validate()?;
+
+    // Extract derivation paths from key_options
+    let derivation_path = sign_request
+        .key_options
+        .private_key_derivation_path
+        .as_deref();
+    let seed_phrase_derivation_path = sign_request
+        .key_options
+        .seed_phrase_derivation_path
+        .as_deref();
+
     let message_bytes = general_purpose::STANDARD
         .decode(&sign_request.message_base64)
         .map_err(|e| {
@@ -636,7 +836,8 @@ pub async fn sign_message(
             user.uuid,
             &message_bytes,
             sign_request.algorithm,
-            sign_request.derivation_path.as_deref(),
+            derivation_path,
+            seed_phrase_derivation_path,
         )
         .await
         .map_err(|e| {
@@ -661,8 +862,18 @@ pub async fn get_public_key(
 ) -> Result<Json<EncryptedResponse<PublicKeyResponseJson>>, ApiError> {
     debug!("Entering get_public_key function");
 
+    // Validate the key_options
+    let validation_query = DerivationPathQuery {
+        key_options: query.key_options.clone(),
+    };
+    validation_query.validate()?;
+
+    // Extract derivation paths from key_options
+    let derivation_path = query.key_options.private_key_derivation_path.as_deref();
+    let seed_phrase_derivation_path = query.key_options.seed_phrase_derivation_path.as_deref();
+
     let user_secret_key = data
-        .get_user_key(user.uuid, query.derivation_path.as_deref())
+        .get_user_key(user.uuid, derivation_path, seed_phrase_derivation_path)
         .await
         .map_err(|e| {
             error!("Error getting user key: {:?}", e);
@@ -833,15 +1044,19 @@ pub async fn encrypt_data(
     debug!("Entering encrypt_data function");
     info!("Encrypting data for user {}", user.uuid);
 
-    // Validate derivation path if present
+    // Validate key_options
     let validation_query = DerivationPathQuery {
-        derivation_path: request.derivation_path.clone(),
+        key_options: request.key_options.clone(),
     };
     validation_query.validate()?;
 
+    // Extract derivation paths from key_options
+    let derivation_path = request.key_options.private_key_derivation_path.as_deref();
+    let seed_phrase_derivation_path = request.key_options.seed_phrase_derivation_path.as_deref();
+
     // Get the user's key
     let user_key = data
-        .get_user_key(user.uuid, request.derivation_path.as_deref())
+        .get_user_key(user.uuid, derivation_path, seed_phrase_derivation_path)
         .await
         .map_err(|e| match e {
             Error::InvalidDerivationPath(msg) => {
@@ -881,20 +1096,24 @@ pub async fn decrypt_data(
 ) -> Result<Json<EncryptedResponse<String>>, ApiError> {
     debug!("Entering decrypt_data function");
     info!(
-        "Decrypting data for user {} with derivation_path: {:?}",
-        user.uuid, request.derivation_path
+        "Decrypting data for user {} with key options: {:?}",
+        user.uuid, request.key_options
     );
 
-    // Validate derivation path if present
+    // Validate key_options
     let validation_query = DerivationPathQuery {
-        derivation_path: request.derivation_path.clone(),
+        key_options: request.key_options.clone(),
     };
     validation_query.validate()?;
     debug!("Derivation path validation successful");
 
+    // Extract derivation paths from key_options
+    let derivation_path = request.key_options.private_key_derivation_path.as_deref();
+    let seed_phrase_derivation_path = request.key_options.seed_phrase_derivation_path.as_deref();
+
     // Get the user's key
     let user_key = data
-        .get_user_key(user.uuid, request.derivation_path.as_deref())
+        .get_user_key(user.uuid, derivation_path, seed_phrase_derivation_path)
         .await
         .map_err(|e| match e {
             Error::InvalidDerivationPath(msg) => {
@@ -975,7 +1194,10 @@ mod tests {
 
         for path in valid_paths {
             let query = DerivationPathQuery {
-                derivation_path: Some(path.to_string()),
+                key_options: KeyOptions {
+                    private_key_derivation_path: Some(path.to_string()),
+                    seed_phrase_derivation_path: None,
+                },
             };
             assert!(query.validate().is_ok(), "Path should be valid: {}", path);
         }
@@ -994,7 +1216,10 @@ mod tests {
 
         for path in invalid_paths {
             let query = DerivationPathQuery {
-                derivation_path: Some(path.to_string()),
+                key_options: KeyOptions {
+                    private_key_derivation_path: Some(path.to_string()),
+                    seed_phrase_derivation_path: None,
+                },
             };
             assert!(
                 query.validate().is_err(),
@@ -1005,9 +1230,76 @@ mod tests {
 
         // Test None path
         let query = DerivationPathQuery {
-            derivation_path: None,
+            key_options: KeyOptions {
+                private_key_derivation_path: None,
+                seed_phrase_derivation_path: None,
+            },
         };
         assert!(query.validate().is_ok(), "None path should be valid");
+
+        // Test valid BIP-85 paths - only 12, 18, and 24 word phrases are supported
+        let valid_bip85_paths = vec![
+            "m/83696968'/39'/0'/12'/0'",   // Standard BIP-85 for 12-word mnemonic
+            "m/83696968'/39'/0'/18'/0'",   // Standard BIP-85 for 18-word mnemonic
+            "m/83696968'/39'/0'/24'/0'",   // Standard BIP-85 for 24-word mnemonic
+            "m/83696968'/39'/0'/12'/5'",   // BIP-85 with non-zero index
+            "m/83696968'/39'/0'/12'/255'", // BIP-85 with large index
+            "m/83696968'/39'/1'/12'/0'",   // BIP-85 with non-English language
+            // Test alternate hardened notation
+            "m/83696968h/39h/0h/12h/0h", // Using 'h' notation instead of '
+        ];
+
+        for path in valid_bip85_paths {
+            let query = DerivationPathQuery {
+                key_options: KeyOptions {
+                    private_key_derivation_path: None,
+                    seed_phrase_derivation_path: Some(path.to_string()),
+                },
+            };
+            assert!(
+                query.validate().is_ok(),
+                "BIP-85 path should be valid: {}",
+                path
+            );
+        }
+
+        // Test invalid BIP-85 paths
+        let invalid_bip85_paths = vec![
+            "m/44'/0'/0'/0/0",             // Not a BIP-85 path (wrong purpose)
+            "m/83696968/39'/0'/12'/0'",    // Purpose not hardened
+            "m/83696968'/39/0'/12'/0'",    // Application not hardened
+            "m/83696968'/39'/0/12'/0'",    // Language not hardened
+            "m/83696968'/39'/0'/12/0'",    // Word count not hardened
+            "m/83696968'/39'/0'/12'/0",    // Index not hardened
+            "m/83696968'/39'/0'/13'/0'",   // Invalid word count (not 12,18,24)
+            "m/83696968'/39'/0'/15'/0'",   // Invalid word count (not 12,18,24)
+            "m/83696968'/39'/0'/21'/0'",   // Invalid word count (not 12,18,24)
+            "m/83696968'/39'/0'/256'/0'",  // Word count too large
+            "m/83696968'",                 // Incomplete path (too few segments)
+            "m/83696968'/39'",             // Incomplete path (too few segments)
+            "m/83696968'/39'/0'",          // Incomplete path (too few segments)
+            "m/83696968'/39'/0'/12'",      // Incomplete path (too few segments)
+            "83696968'/39'/0'/12'/0'",     // Missing 'm' prefix
+            "m/83696968'/38'/0'/12'/0'",   // Wrong application (not 39)
+            "m/83696968'/39'/0'/12'/0'/0", // Extra segment
+            "m/83696968'/39'/ABC'/12'/0'", // Non-numeric language
+            "m/83696968'/39'/0'/ABC'/0'",  // Non-numeric word count
+            "m/83696968'/39'/0'/12'/ABC'", // Non-numeric index
+        ];
+
+        for path in invalid_bip85_paths {
+            let query = DerivationPathQuery {
+                key_options: KeyOptions {
+                    private_key_derivation_path: None,
+                    seed_phrase_derivation_path: Some(path.to_string()),
+                },
+            };
+            assert!(
+                query.validate().is_err(),
+                "BIP-85 path should be invalid: {}",
+                path
+            );
+        }
     }
 
     #[tokio::test]

@@ -693,18 +693,21 @@ impl AppState {
         Ok(user)
     }
 
-    /// Returns the user's private key, optionally derived using the provided derivation path.
+    /// Returns the user's private key, optionally derived using the provided derivation paths.
     ///
     /// # Arguments
     /// * `user_uuid` - The UUID of the user
-    /// * `derivation_path` - Optional BIP32 derivation path (e.g., "m/44'/0'/0'/0/0")
+    /// * `derivation_path` - Optional BIP-32 derivation path
+    /// * `seed_phrase_derivation_path` - Optional BIP-85 derivation path to derive a child seed
     ///
     /// # Returns
-    /// * `Result<SecretKey, Error>` - The user's private key or a derived key if a path is provided
+    /// * `Result<SecretKey, Error>` - The user's private key, potentially derived through
+    ///   BIP-85 and/or BIP-32 derivation paths
     async fn get_user_key(
         &self,
         user_uuid: Uuid,
         derivation_path: Option<&str>,
+        seed_phrase_derivation_path: Option<&str>,
     ) -> Result<SecretKey, Error> {
         let user = self.get_user(user_uuid).await?;
 
@@ -713,15 +716,19 @@ impl AppState {
             None => {
                 // create seed if not already exists
                 let updated_user = self.generate_private_key(user_uuid).await?;
-                updated_user
-                    .get_seed_encrypted()
-                    .await
-                    .ok_or(Error::PrivateKeyGenerationFailure)?
+                updated_user.get_seed_encrypted().await.ok_or_else(|| {
+                    error!("Seed not found after generation for user: {}", user_uuid);
+                    Error::PrivateKeyGenerationFailure
+                })?
             }
         };
 
-        let user_secret_key =
-            decrypt_user_seed_to_key(self.enclave_key.clone(), encrypted_seed, derivation_path)?;
+        let user_secret_key = decrypt_user_seed_to_key(
+            self.enclave_key.clone(),
+            encrypted_seed,
+            derivation_path,
+            seed_phrase_derivation_path,
+        )?;
 
         Ok(user_secret_key)
     }
@@ -733,8 +740,11 @@ impl AppState {
         message_bytes: &[u8],
         algorithm: message_signing::SigningAlgorithm,
         derivation_path: Option<&str>,
+        seed_phrase_derivation_path: Option<&str>,
     ) -> Result<message_signing::SignMessageResponse, Error> {
-        let user_secret_key = self.get_user_key(user_uuid, derivation_path).await?;
+        let user_secret_key = self
+            .get_user_key(user_uuid, derivation_path, seed_phrase_derivation_path)
+            .await?;
         message_signing::sign_message(&user_secret_key, message_bytes, algorithm)
     }
 
@@ -762,7 +772,7 @@ impl AppState {
 
     async fn get(&self, user_id: Uuid, key: String) -> StoreResult<Option<String>> {
         let user_key = self
-            .get_user_key(user_id, None)
+            .get_user_key(user_id, None, None)
             .await
             .map_err(|_| StoreError::Unauthorized)?;
         kv::get(self.db.get_pool(), user_id, &key, &user_key)
@@ -770,7 +780,7 @@ impl AppState {
 
     async fn put(&self, user_id: Uuid, key: String, value: String) -> StoreResult<()> {
         let user_key = self
-            .get_user_key(user_id, None)
+            .get_user_key(user_id, None, None)
             .await
             .map_err(|_| StoreError::Unauthorized)?;
         kv::put(
@@ -786,7 +796,7 @@ impl AppState {
 
     async fn delete(&self, user_id: Uuid, key: String) -> StoreResult<()> {
         let user_key = self
-            .get_user_key(user_id, None)
+            .get_user_key(user_id, None, None)
             .await
             .map_err(|_| StoreError::Unauthorized)?;
         kv::delete(self.db.get_pool(), user_id, &key, &user_key)
@@ -794,7 +804,7 @@ impl AppState {
 
     async fn list(&self, user_id: Uuid) -> StoreResult<Vec<KVPair>> {
         let user_key = self
-            .get_user_key(user_id, None)
+            .get_user_key(user_id, None, None)
             .await
             .map_err(|_| StoreError::Unauthorized)?;
         kv::list(self.db.get_pool(), user_id, &user_key)

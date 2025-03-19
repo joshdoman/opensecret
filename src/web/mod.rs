@@ -5,7 +5,7 @@ pub mod login_routes;
 mod oauth_routes;
 mod openai;
 pub mod platform;
-mod protected_routes;
+pub mod protected_routes;
 
 pub use health_routes::router as health_routes;
 pub use login_routes::router as login_routes;
