@@ -121,17 +121,24 @@ pub struct KeyOptions {
 impl KeyOptions {
     /// Validates both derivation paths if present.
     pub fn validate(&self) -> Result<(), ApiError> {
+        debug!("Validating key options");
+
         // Validate private_key_derivation_path if present
         if let Some(ref path) = self.private_key_derivation_path {
+            debug!("Validating BIP-32 derivation path: {}", path);
             validate_path(path)?;
+            info!("BIP-32 derivation path validation successful: {}", path);
         }
 
         // Validate seed_phrase_derivation_path if present
         if let Some(ref path) = self.seed_phrase_derivation_path {
+            debug!("Validating BIP-85 derivation path: {}", path);
             validate_path(path)?;
             validate_bip85_path(path)?;
+            info!("BIP-85 derivation path validation successful: {}", path);
         }
 
+        debug!("Key options validation completed successfully");
         Ok(())
     }
 }
@@ -144,18 +151,27 @@ impl KeyOptions {
 /// - WORDS' must be one of VALID_BIP39_WORD_COUNTS (12', 18', 24', must be hardened)
 /// - INDEX' is the derivation index (must be hardened)
 pub fn validate_bip85_path(path: &str) -> Result<(), ApiError> {
+    debug!("Validating BIP-85 path: {}", path);
+
     // Split the path into segments
     let segments: Vec<&str> = path.split('/').collect();
 
     // Path must have exactly 6 segments: m/PURPOSE'/APP'/LANGUAGE'/WORDS'/INDEX'
     if segments.len() != 6 {
-        error!("BIP-85 path must have exactly 6 segments: {}", path);
+        error!(
+            "BIP-85 path must have exactly 6 segments, found {}: {}",
+            segments.len(),
+            path
+        );
         return Err(ApiError::BadRequest);
     }
 
     // First segment should be "m" (master key)
     if segments[0] != "m" {
-        error!("BIP-85 path must start with 'm': {}", path);
+        error!(
+            "BIP-85 path must start with 'm', found '{}': {}",
+            segments[0], path
+        );
         return Err(ApiError::BadRequest);
     }
 
@@ -165,8 +181,8 @@ pub fn validate_bip85_path(path: &str) -> Result<(), ApiError> {
         || !(purpose.ends_with('\'') || purpose.ends_with('h'))
     {
         error!(
-            "BIP-85 path purpose must be {}' or {}h: {}",
-            BIP85_PURPOSE, BIP85_PURPOSE, path
+            "BIP-85 path purpose must be {}' or {}h, found '{}': {}",
+            BIP85_PURPOSE, BIP85_PURPOSE, purpose, path
         );
         return Err(ApiError::BadRequest);
     }
@@ -177,8 +193,8 @@ pub fn validate_bip85_path(path: &str) -> Result<(), ApiError> {
         || !(application.ends_with('\'') || application.ends_with('h'))
     {
         error!(
-            "BIP-85 path application must be {}' or {}h for BIP-39 mnemonics: {}",
-            BIP85_APPLICATION_BIP39, BIP85_APPLICATION_BIP39, path
+            "BIP-85 path application must be {}' or {}h for BIP-39 mnemonics, found '{}': {}",
+            BIP85_APPLICATION_BIP39, BIP85_APPLICATION_BIP39, application, path
         );
         return Err(ApiError::BadRequest);
     }
@@ -186,16 +202,24 @@ pub fn validate_bip85_path(path: &str) -> Result<(), ApiError> {
     // Check language is hardened
     let language = segments[3];
     if !(language.ends_with('\'') || language.ends_with('h')) {
-        error!("BIP-85 path language must be hardened: {}", path);
+        error!(
+            "BIP-85 path language must be hardened, found '{}': {}",
+            language, path
+        );
         return Err(ApiError::BadRequest);
     }
+
+    debug!("BIP-85 path language component valid: {}", language);
 
     // Check word count is valid (12, 18, 24) and hardened
     let word_count = segments[4];
     let word_count_value = match word_count.trim_end_matches(&['\'', 'h'][..]).parse::<u32>() {
         Ok(value) => value,
         Err(_) => {
-            error!("BIP-85 path word count must be a number: {}", path);
+            error!(
+                "BIP-85 path word count must be a number, found '{}': {}",
+                word_count, path
+            );
             return Err(ApiError::BadRequest);
         }
     };
@@ -203,34 +227,47 @@ pub fn validate_bip85_path(path: &str) -> Result<(), ApiError> {
     // Validate word count is one of the valid options
     if !VALID_BIP39_WORD_COUNTS.contains(&word_count_value) {
         error!(
-            "BIP-85 path word count must be one of {:?}: {}",
-            VALID_BIP39_WORD_COUNTS, path
+            "BIP-85 path word count must be one of {:?}, found {}: {}",
+            VALID_BIP39_WORD_COUNTS, word_count_value, path
         );
         return Err(ApiError::BadRequest);
     }
 
+    debug!("BIP-85 path word count valid: {} words", word_count_value);
+
     // Check word count is hardened
     if !(word_count.ends_with('\'') || word_count.ends_with('h')) {
-        error!("BIP-85 path word count must be hardened: {}", path);
+        error!(
+            "BIP-85 path word count must be hardened, found '{}': {}",
+            word_count, path
+        );
         return Err(ApiError::BadRequest);
     }
 
     // Check index is hardened
     let index = segments[5];
     if !(index.ends_with('\'') || index.ends_with('h')) {
-        error!("BIP-85 path index must be hardened: {}", path);
+        error!(
+            "BIP-85 path index must be hardened, found '{}': {}",
+            index, path
+        );
         return Err(ApiError::BadRequest);
     }
 
     // Try to parse the index to ensure it's a valid number
-    if index
-        .trim_end_matches(&['\'', 'h'][..])
-        .parse::<u32>()
-        .is_err()
-    {
-        error!("BIP-85 path index must be a valid number: {}", path);
-        return Err(ApiError::BadRequest);
-    }
+    let index_value = match index.trim_end_matches(&['\'', 'h'][..]).parse::<u32>() {
+        Ok(value) => value,
+        Err(_) => {
+            error!(
+                "BIP-85 path index must be a valid number, found '{}': {}",
+                index, path
+            );
+            return Err(ApiError::BadRequest);
+        }
+    };
+
+    debug!("BIP-85 path index valid: {}", index_value);
+    info!("BIP-85 path validation successful: {}", path);
 
     Ok(())
 }
@@ -239,7 +276,7 @@ pub fn validate_bip85_path(path: &str) -> Result<(), ApiError> {
 /// The derivation path should follow BIP32 format (e.g., "m/44'/0'/0'/0/0").
 #[derive(Debug, Clone, Deserialize)]
 pub struct DerivationPathQuery {
-    #[serde(default)]
+    #[serde(default, flatten)]
     pub key_options: KeyOptions,
 }
 
@@ -290,7 +327,7 @@ pub struct PublicKeyResponseJson {
 #[derive(Debug, Deserialize)]
 pub struct PublicKeyQuery {
     algorithm: SigningAlgorithm,
-    #[serde(default)]
+    #[serde(default, flatten)]
     key_options: KeyOptions,
 }
 
@@ -369,17 +406,13 @@ pub fn router(app_state: Arc<AppState>) -> Router<()> {
         )
         .route(
             "/protected/private_key",
-            get(get_private_key).layer(from_fn_with_state(
-                app_state.clone(),
-                decrypt_request::<DerivationPathQuery>,
-            )),
+            get(get_private_key)
+                .layer(from_fn_with_state(app_state.clone(), decrypt_request::<()>)),
         )
         .route(
             "/protected/private_key_bytes",
-            get(get_private_key_bytes).layer(from_fn_with_state(
-                app_state.clone(),
-                decrypt_request::<DerivationPathQuery>,
-            )),
+            get(get_private_key_bytes)
+                .layer(from_fn_with_state(app_state.clone(), decrypt_request::<()>)),
         )
         .route(
             "/protected/sign_message",
@@ -696,17 +729,33 @@ pub async fn get_private_key(
     Extension(session_id): Extension<Uuid>,
     Query(query): Query<DerivationPathQuery>,
 ) -> Result<Json<EncryptedResponse<PrivateKeyResponse>>, ApiError> {
-    debug!("Entering get_private_key function");
+    info!("Entering get_private_key function for user: {}", user.uuid);
+
+    // Log received derivation paths for debugging purposes
+    if let Some(path) = &query.key_options.seed_phrase_derivation_path {
+        info!("Received BIP-85 derivation path: {}", path);
+    }
+    if let Some(path) = &query.key_options.private_key_derivation_path {
+        info!("Received BIP-32 derivation path: {}", path);
+    }
 
     // Validate paths if present
+    debug!("Validating derivation paths");
     query.validate()?;
 
     // First try to get the existing encrypted seed
+    debug!("Retrieving encrypted seed for user");
     let encrypted_seed = match user.get_seed_encrypted().await {
-        Some(seed) => seed,
+        Some(seed) => {
+            debug!("Found existing encrypted seed");
+            seed
+        }
         None => {
             // Only generate a new key if one doesn't exist
-            debug!("No existing key found, generating new key");
+            info!(
+                "No seed found, generating new private key for user: {}",
+                user.uuid
+            );
             data.generate_private_key(user.uuid)
                 .await
                 .map_err(|e| {
@@ -724,6 +773,7 @@ pub async fn get_private_key(
 
     // Check if BIP-85 derivation is requested
     if let Some(bip85_path) = &query.key_options.seed_phrase_derivation_path {
+        info!("BIP-85 derivation requested with path: {}", bip85_path);
         // Derive a child mnemonic
         let child_mnemonic = crate::private_key::decrypt_and_derive_bip85_mnemonic(
             data.enclave_key.clone(),
@@ -735,25 +785,37 @@ pub async fn get_private_key(
             ApiError::BadRequest
         })?;
 
+        let word_count = child_mnemonic.word_count();
+        info!(
+            "Successfully derived BIP-85 mnemonic with {} words",
+            word_count
+        );
+
         let response = PrivateKeyResponse {
             mnemonic: child_mnemonic.to_string(),
         };
 
-        debug!("Exiting get_private_key function with derived mnemonic");
+        debug!("Encrypting response with derived mnemonic");
+        info!("Exiting get_private_key function with derived BIP-85 mnemonic");
         encrypt_response(&data, &session_id, &response).await
     } else {
         // Return root mnemonic
+        info!("Returning root mnemonic (no BIP-85 derivation)");
         let mnemonic = decrypt_user_seed_to_mnemonic(data.enclave_key.clone(), encrypted_seed)
             .map_err(|e| {
                 error!("Failed to decrypt user seed: {:?}", e);
                 ApiError::InternalServerError
             })?;
 
+        let word_count = mnemonic.word_count();
+        debug!("Root mnemonic has {} words", word_count);
+
         let response = PrivateKeyResponse {
             mnemonic: mnemonic.to_string(),
         };
 
-        debug!("Exiting get_private_key function with root mnemonic");
+        debug!("Encrypting response with root mnemonic");
+        info!("Exiting get_private_key function with root mnemonic");
         encrypt_response(&data, &session_id, &response).await
     }
 }
@@ -764,12 +826,25 @@ pub async fn get_private_key_bytes(
     Extension(session_id): Extension<Uuid>,
     Query(query): Query<DerivationPathQuery>,
 ) -> Result<Json<EncryptedResponse<PrivateKeyBytesResponse>>, ApiError> {
-    debug!("Entering get_private_key_bytes function");
+    info!(
+        "Entering get_private_key_bytes function for user: {}",
+        user.uuid
+    );
+
+    // Log received derivation paths for debugging purposes
+    if let Some(path) = &query.key_options.seed_phrase_derivation_path {
+        info!("Received BIP-85 derivation path: {}", path);
+    }
+    if let Some(path) = &query.key_options.private_key_derivation_path {
+        info!("Received BIP-32 derivation path: {}", path);
+    }
 
     // Validate derivation path if present
+    debug!("Validating derivation paths");
     query.validate()?;
 
     // Use the method that supports both BIP-85 and BIP-32 derivation
+    debug!("Getting user key with provided derivation paths");
     let secret_key = data
         .get_user_key(
             user.uuid,
@@ -792,11 +867,16 @@ pub async fn get_private_key_bytes(
             }
         })?;
 
+    info!("Successfully retrieved private key for user: {}", user.uuid);
+
+    // Convert key to string
+    debug!("Converting private key to string format");
     let response = PrivateKeyBytesResponse {
         private_key: secret_key.display_secret().to_string(),
     };
 
-    debug!("Exiting get_private_key_bytes function");
+    debug!("Encrypting private key response");
+    info!("Exiting get_private_key_bytes function");
     encrypt_response(&data, &session_id, &response).await
 }
 
@@ -806,9 +886,11 @@ pub async fn sign_message(
     Extension(sign_request): Extension<SignMessageRequest>,
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<SignMessageResponseJson>>, ApiError> {
-    debug!("Entering sign_message function");
+    info!("Entering sign_message function for user: {}", user.uuid);
+    debug!("Sign request algorithm: {:?}", sign_request.algorithm);
 
     // Validate key_options
+    debug!("Validating key options");
     let validation_query = DerivationPathQuery {
         key_options: sign_request.key_options.clone(),
     };
@@ -824,6 +906,16 @@ pub async fn sign_message(
         .seed_phrase_derivation_path
         .as_deref();
 
+    // Log derivation paths if present
+    if let Some(path) = derivation_path {
+        info!("Using BIP-32 derivation path: {}", path);
+    }
+
+    if let Some(path) = seed_phrase_derivation_path {
+        info!("Using BIP-85 derivation path: {}", path);
+    }
+
+    debug!("Decoding base64 message");
     let message_bytes = general_purpose::STANDARD
         .decode(&sign_request.message_base64)
         .map_err(|e| {
@@ -831,6 +923,10 @@ pub async fn sign_message(
             ApiError::BadRequest
         })?;
 
+    debug!(
+        "Signing message with algorithm: {:?}",
+        sign_request.algorithm
+    );
     let response = data
         .sign_message(
             user.uuid,
@@ -845,12 +941,15 @@ pub async fn sign_message(
             ApiError::InternalServerError
         })?;
 
+    info!("Message signed successfully for user: {}", user.uuid);
+    debug!("Creating JSON response");
     let json_response = SignMessageResponseJson {
         signature: response.signature.to_string(),
         message_hash: hex::encode(response.message_hash),
     };
 
-    debug!("Exiting sign_message function");
+    debug!("Encrypting signed message response");
+    info!("Exiting sign_message function");
     encrypt_response(&data, &session_id, &json_response).await
 }
 

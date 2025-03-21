@@ -53,7 +53,7 @@ use tokio::spawn;
 use tokio::sync::RwLock;
 use tokio::task::{self};
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use url::Url;
 use uuid::Uuid;
@@ -709,12 +709,30 @@ impl AppState {
         derivation_path: Option<&str>,
         seed_phrase_derivation_path: Option<&str>,
     ) -> Result<SecretKey, Error> {
+        info!("Getting user key for UUID: {}", user_uuid);
+
+        if let Some(path) = derivation_path {
+            debug!("Using BIP-32 derivation path: {}", path);
+        }
+
+        if let Some(path) = seed_phrase_derivation_path {
+            debug!("Using BIP-85 derivation path: {}", path);
+        }
+
         let user = self.get_user(user_uuid).await?;
+        debug!("User retrieved successfully");
 
         let encrypted_seed = match user.get_seed_encrypted().await {
-            Some(es) => es,
+            Some(es) => {
+                debug!("Found existing encrypted seed for user");
+                es
+            }
             None => {
                 // create seed if not already exists
+                info!(
+                    "No seed found for user {}, generating new private key",
+                    user_uuid
+                );
                 let updated_user = self.generate_private_key(user_uuid).await?;
                 updated_user.get_seed_encrypted().await.ok_or_else(|| {
                     error!("Seed not found after generation for user: {}", user_uuid);
@@ -723,6 +741,7 @@ impl AppState {
             }
         };
 
+        debug!("Decrypting user seed and deriving key");
         let user_secret_key = decrypt_user_seed_to_key(
             self.enclave_key.clone(),
             encrypted_seed,
@@ -730,6 +749,7 @@ impl AppState {
             seed_phrase_derivation_path,
         )?;
 
+        info!("Successfully derived key for user: {}", user_uuid);
         Ok(user_secret_key)
     }
 
@@ -742,10 +762,34 @@ impl AppState {
         derivation_path: Option<&str>,
         seed_phrase_derivation_path: Option<&str>,
     ) -> Result<message_signing::SignMessageResponse, Error> {
+        info!(
+            "Signing message for user: {}, algorithm: {:?}",
+            user_uuid, algorithm
+        );
+
+        if let Some(path) = derivation_path {
+            debug!("Using BIP-32 derivation path: {}", path);
+        }
+
+        if let Some(path) = seed_phrase_derivation_path {
+            debug!("Using BIP-85 derivation path: {}", path);
+        }
+
+        debug!("Getting user key for message signing");
         let user_secret_key = self
             .get_user_key(user_uuid, derivation_path, seed_phrase_derivation_path)
             .await?;
-        message_signing::sign_message(&user_secret_key, message_bytes, algorithm)
+
+        debug!("Signing message with algorithm: {:?}", algorithm);
+        let result = message_signing::sign_message(&user_secret_key, message_bytes, algorithm);
+
+        if result.is_ok() {
+            info!("Message signed successfully for user: {}", user_uuid);
+        } else {
+            error!("Failed to sign message for user: {}", user_uuid);
+        }
+
+        result
     }
 
     // DEPRECATED: New users now always get a private key
