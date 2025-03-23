@@ -47,7 +47,12 @@ pub async fn encrypt_with_key(encryption_key: &SecretKey, bytes: &[u8]) -> Vec<u
 
 pub fn decrypt_with_key(encryption_key: &SecretKey, bytes: &[u8]) -> Result<Vec<u8>, EncryptError> {
     tracing::debug!("Entering decrypt_with_key");
+
     if bytes.len() < 12 {
+        tracing::error!(
+            "Decrypt failed: Input too short (length {}), minimum 12 bytes required",
+            bytes.len()
+        );
         return Err(EncryptError::BadData);
     }
 
@@ -57,13 +62,22 @@ pub fn decrypt_with_key(encryption_key: &SecretKey, bytes: &[u8]) -> Result<Vec<
     // The rest is the ciphertext
     let ciphertext = &bytes[12..];
 
-    let cipher = Aes256Gcm::new_from_slice(&encryption_key.secret_bytes())
-        .map_err(|_| EncryptError::FailedToDecrypt)?;
+    let cipher = Aes256Gcm::new_from_slice(&encryption_key.secret_bytes()).map_err(|e| {
+        tracing::error!("Failed to create cipher from key: {e}");
+        EncryptError::FailedToDecrypt
+    })?;
+
+    let result = cipher.decrypt(nonce, ciphertext).map_err(|e| {
+        // Log detailed error without revealing any sensitive data
+        tracing::error!(
+            "AES-GCM decryption failed: {:?}. Input length: {}, nonce length: 12, ciphertext length: {}",
+            e, bytes.len(), ciphertext.len()
+        );
+        EncryptError::FailedToDecrypt
+    })?;
 
     tracing::debug!("Exiting decrypt_with_key");
-    cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|_| EncryptError::FailedToDecrypt)
+    Ok(result)
 }
 
 pub fn encrypt_key_deterministic(encryption_key: &SecretKey, key: &[u8]) -> Vec<u8> {
