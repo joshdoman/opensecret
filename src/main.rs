@@ -716,7 +716,7 @@ impl AppState {
                 updated_user
                     .get_seed_encrypted()
                     .await
-                    .expect("seed should have been created")
+                    .ok_or(Error::PrivateKeyGenerationFailure)?
             }
         };
 
@@ -738,6 +738,7 @@ impl AppState {
         message_signing::sign_message(&user_secret_key, message_bytes, algorithm)
     }
 
+    // DEPRECATED: New users now always get a private key
     async fn generate_private_key(&self, user_uuid: Uuid) -> Result<User, Error> {
         let user = self.get_user(user_uuid).await?;
 

@@ -9,6 +9,8 @@ use uuid::Uuid;
 pub enum UserError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] diesel::result::Error),
+    #[error("User already has encryption key set")]
+    KeyAlreadyExists,
 }
 
 #[derive(Queryable, AsChangeset, Serialize, Deserialize, Clone, PartialEq)]
@@ -94,12 +96,18 @@ impl User {
         conn: &mut PgConnection,
         new_seed_encrypted: Vec<u8>,
     ) -> Result<(), UserError> {
-        diesel::update(users::table)
+        let affected = diesel::update(users::table)
             .filter(users::id.eq(self.id))
+            .filter(users::seed_enc.is_null())
             .set(users::seed_enc.eq(new_seed_encrypted))
             .execute(conn)
-            .map(|_| ())
-            .map_err(UserError::DatabaseError)
+            .map_err(UserError::DatabaseError)?;
+
+        if affected == 0 {
+            Err(UserError::KeyAlreadyExists)
+        } else {
+            Ok(())
+        }
     }
 
     pub fn get_id(&self) -> Uuid {
