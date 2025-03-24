@@ -1,5 +1,3 @@
-use crate::decrypt_with_key;
-use crate::models::email_verification::NewEmailVerification;
 use crate::models::oauth::NewUserOAuthConnection;
 use crate::oauth::OAuthState;
 use crate::web::encryption_middleware::{decrypt_request, encrypt_response, EncryptedResponse};
@@ -8,7 +6,9 @@ use crate::web::platform::PROJECT_GITHUB_OAUTH_SECRET;
 use crate::web::platform::PROJECT_GOOGLE_OAUTH_SECRET;
 use crate::GithubProvider;
 use crate::GoogleProvider;
+use crate::{decrypt_with_key, private_key::generate_twelve_word_seed};
 use crate::{encrypt, DBError};
+use crate::{encrypt::encrypt_with_key, models::email_verification::NewEmailVerification};
 use crate::{
     jwt::{NewToken, TokenType},
     models::users::{NewUser, User},
@@ -634,8 +634,20 @@ async fn find_or_create_user_from_oauth(
             }
         }
         Err(DBError::UserNotFound) => {
+            // Generate private key for new user
+            let user_seed_words =
+                generate_twelve_word_seed(app_state.aws_credential_manager.clone())
+                    .await
+                    .map_err(|_e| ApiError::InternalServerError)?
+                    .to_string();
+
+            let secret_key = SecretKey::from_slice(&app_state.enclave_key.clone())
+                .map_err(|_e| ApiError::EncryptionError)?;
+
+            let encrypted_key = encrypt_with_key(&secret_key, user_seed_words.as_bytes()).await;
+
             // Create new user
-            let new_user = NewUser::new(Some(email.clone()), None, project_id)
+            let new_user = NewUser::new(Some(email.clone()), None, project_id, encrypted_key)
                 .with_name(user_name.unwrap_or_default());
 
             let user = app_state.db.create_user(new_user).map_err(|e| {

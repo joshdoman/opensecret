@@ -880,13 +880,17 @@ pub async fn decrypt_data(
     Extension(session_id): Extension<Uuid>,
 ) -> Result<Json<EncryptedResponse<String>>, ApiError> {
     debug!("Entering decrypt_data function");
-    info!("Decrypting data for user {}", user.uuid);
+    info!(
+        "Decrypting data for user {} with derivation_path: {:?}",
+        user.uuid, request.derivation_path
+    );
 
     // Validate derivation path if present
     let validation_query = DerivationPathQuery {
         derivation_path: request.derivation_path.clone(),
     };
     validation_query.validate()?;
+    debug!("Derivation path validation successful");
 
     // Get the user's key
     let user_key = data
@@ -902,38 +906,51 @@ pub async fn decrypt_data(
                 ApiError::BadRequest
             }
             _ => {
-                error!("Failed to get user key: {:?}", e);
+                error!("Failed to get user key: {e}");
                 ApiError::InternalServerError
             }
         })?;
+    debug!("Successfully retrieved user key");
 
     // Decode the base64 encrypted data
-    let encrypted_data = general_purpose::STANDARD
-        .decode(&request.encrypted_data)
-        .map_err(|e| {
-            error!("Failed to decode base64 data: {:?}", e);
-            ApiError::BadRequest
-        })?;
+    let encrypted_data = match general_purpose::STANDARD.decode(&request.encrypted_data) {
+        Ok(data) => data,
+        Err(e) => {
+            error!("Failed to decode base64 data: {e}");
+            return Err(ApiError::BadRequest);
+        }
+    };
 
     // Decrypt the data
-    let decrypted_data = encrypt::decrypt_with_key(&user_key, &encrypted_data).map_err(|e| {
-        error!("Decryption failed: {:?}", e);
-        ApiError::BadRequest
-    })?;
+    let decrypted_data = match encrypt::decrypt_with_key(&user_key, &encrypted_data) {
+        Ok(data) => {
+            debug!("Successfully decrypted data");
+            data
+        }
+        Err(e) => {
+            error!("Decryption failed: {e}");
+            return Err(ApiError::BadRequest);
+        }
+    };
 
     // Convert decrypted bytes to string
-    let decrypted_string = String::from_utf8(decrypted_data).map_err(|e| {
-        error!("Failed to convert decrypted data to string: {:?}", e);
-        ApiError::BadRequest
-    })?;
+    let decrypted_string = match String::from_utf8(decrypted_data) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to convert decrypted data to string: {e}");
+            return Err(ApiError::BadRequest);
+        }
+    };
 
-    debug!("Exiting decrypt_data function");
+    debug!("Exiting decrypt_data function, preparing encrypted response");
     encrypt_response(&data, &session_id, &decrypted_string).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encrypt::{decrypt_with_key, encrypt_with_key};
+    use secp256k1::SecretKey;
 
     #[test]
     fn test_derivation_path_validation() {
@@ -991,5 +1008,132 @@ mod tests {
             derivation_path: None,
         };
         assert!(query.validate().is_ok(), "None path should be valid");
+    }
+
+    #[tokio::test]
+    async fn test_encrypt_decrypt_empty_array() {
+        // Mock a private key for testing
+        let test_key = SecretKey::from_slice(&[0x42; 32]).unwrap();
+
+        // Test with empty array as JSON string "[]"
+        let empty_array = "[]".as_bytes();
+
+        // First encryption
+        let encrypted1 = encrypt_with_key(&test_key, empty_array).await;
+        // Second encryption of the same data
+        let encrypted2 = encrypt_with_key(&test_key, empty_array).await;
+
+        // Since we use a random nonce, the two encryptions should be different
+        assert_ne!(encrypted1, encrypted2);
+
+        // Decrypt the first encrypted value
+        let decrypted1 = decrypt_with_key(&test_key, &encrypted1).unwrap();
+        assert_eq!(decrypted1, empty_array);
+
+        // Decrypt the second encrypted value - this should also work
+        let decrypted2 = decrypt_with_key(&test_key, &encrypted2).unwrap();
+        assert_eq!(decrypted2, empty_array);
+
+        // Test with multiple consecutive decryption attempts on the same encrypted values
+        let decrypted1_again = decrypt_with_key(&test_key, &encrypted1).unwrap();
+        assert_eq!(decrypted1_again, empty_array);
+
+        let decrypted2_again = decrypt_with_key(&test_key, &encrypted2).unwrap();
+        assert_eq!(decrypted2_again, empty_array);
+    }
+
+    #[tokio::test]
+    async fn test_encrypt_decrypt_base64_payload() {
+        // Test with the specific base64 payloads from the user report
+        let test_key = SecretKey::from_slice(&[0x42; 32]).unwrap();
+
+        // Recreate the two payloads mentioned in the report
+        let payload1 = general_purpose::STANDARD
+            .decode("eoW3a/gBol+uMLr6DmMwMjYHxiS31/cSet3sAnTi")
+            .unwrap();
+        let payload2 = general_purpose::STANDARD
+            .decode("YWF2+/2fKK1UBTaFqpAzGh/7y/QrxzfE5/FkqLfe")
+            .unwrap();
+
+        // Attempt to decrypt both payloads
+        match decrypt_with_key(&test_key, &payload1) {
+            Ok(decrypted) => {
+                // If decryption succeeds, check if it's an empty array
+                let as_str = String::from_utf8_lossy(&decrypted);
+                println!("Payload 1 decrypted: {}", as_str);
+            }
+            Err(e) => {
+                // Expected - our test key won't match the real key, but we're testing the process
+                println!("Payload 1 decryption failed as expected: {:?}", e);
+            }
+        }
+
+        match decrypt_with_key(&test_key, &payload2) {
+            Ok(decrypted) => {
+                // If decryption succeeds, check if it's an empty array
+                let as_str = String::from_utf8_lossy(&decrypted);
+                println!("Payload 2 decrypted: {}", as_str);
+            }
+            Err(e) => {
+                // Expected - our test key won't match the real key, but we're testing the process
+                println!("Payload 2 decryption failed as expected: {:?}", e);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multiple_empty_array_encryptions() {
+        // Simulate the exact user scenario: multiple different private keys,
+        // each encrypting "[]" twice, then decrypting both versions
+        let empty_array = "[]".as_bytes();
+
+        // Run 10 iterations with different keys
+        for i in 0..10 {
+            // Generate a valid key for each iteration
+            // Use a pattern that ensures a valid secp256k1 key (non-zero, less than curve order)
+            let base_key = [
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x10, 0x11, 0x12, 0x13, 0x14,
+                0x15, 0x16, 0x17, 0x18, 0x19, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+                0x29, 0x30, 0x31, 0x32,
+            ];
+            let mut key_bytes = base_key;
+            key_bytes[0] = (i + 1) as u8; // Change first byte based on iteration
+
+            let private_key = SecretKey::from_slice(&key_bytes)
+                .unwrap_or_else(|e| panic!("Failed to create key in iteration {}: {:?}", i, e));
+
+            // Encrypt the empty array twice with the same key
+            let encrypted1 = encrypt_with_key(&private_key, empty_array).await;
+            let encrypted2 = encrypt_with_key(&private_key, empty_array).await;
+
+            // The encryptions should be different due to random nonce
+            assert_ne!(
+                encrypted1, encrypted2,
+                "Iteration {}: Encryptions should differ",
+                i
+            );
+
+            // Decrypt both and verify they both correctly decrypt to "[]"
+            let decrypted1 = decrypt_with_key(&private_key, &encrypted1)
+                .unwrap_or_else(|e| panic!("Iteration {}: First decryption failed: {:?}", i, e));
+
+            let decrypted2 = decrypt_with_key(&private_key, &encrypted2)
+                .unwrap_or_else(|e| panic!("Iteration {}: Second decryption failed: {:?}", i, e));
+
+            // Both decryptions should match the original empty array
+            assert_eq!(
+                decrypted1, empty_array,
+                "Iteration {}: First decryption didn't match original data",
+                i
+            );
+            assert_eq!(
+                decrypted2, empty_array,
+                "Iteration {}: Second decryption didn't match original data",
+                i
+            );
+
+            // Print debug info
+            println!("Iteration {}: Both decryptions successful", i);
+        }
     }
 }
