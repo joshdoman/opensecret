@@ -610,11 +610,18 @@ impl AppState {
         let secret_key = SecretKey::from_slice(&self.enclave_key.clone())
             .map_err(|e| Error::EncryptionError(e.to_string()))?;
 
-        let encrypted_data = encrypt_with_key(&secret_key, password_hash.as_bytes()).await;
+        let encrypted_pw = encrypt_with_key(&secret_key, password_hash.as_bytes()).await;
 
         tracing::debug!("registering new user: {:?}", creds.email);
 
-        let new_user = NewUser::new(creds.email, Some(encrypted_data), project.id)
+        // Generate private key for new user
+        let user_seed_words = generate_twelve_word_seed(self.aws_credential_manager.clone())
+            .await?
+            .to_string();
+
+        let encrypted_key = encrypt_with_key(&secret_key, user_seed_words.as_bytes()).await;
+
+        let new_user = NewUser::new(creds.email, Some(encrypted_pw), project.id, encrypted_key)
             .with_name_option(creds.name);
 
         let user = self.db.create_user(new_user)?;
