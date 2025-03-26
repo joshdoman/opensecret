@@ -8,6 +8,7 @@ axum = { version = "0.7.5", features = ["macros"] }
 axum-macros = { version = "0.4.1" }
 password-auth = "1.0.0"
 bip39 = { version = "2.0.0" }
+bip85_extended = "1.1.0"
 bitcoin = { version = "0.32.2", default-features = false, features = ["std", "serde", "secp-recovery", "rand"] }
 aws-nitro-enclaves-nsm-api = "0.3.0"
 aws-smithy-runtime = "1.7.4"
