@@ -31,3 +31,11 @@ manifests/
 
 # AI Prompts
 .prompts/
+
+# PCR signing keys (files only, no directories needed)
+**/pcr_*.pem
+**/pcr_*.key
+**/pcr_*.der
+**/pcr_*.b64
+**/pcr_private*
+**/pcr_public*

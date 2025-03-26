@@ -1,0 +1,10 @@
+[
+  {
+    "HashAlgorithm": "Sha384 { ... }",
+    "PCR0": "3637534c33a8bafc5034d5763e441a481f161bbbe888e375ce14b016c7497dc4e550afe866bd8e65969b409d54766481",
+    "PCR1": "e45de6f4e9809176f6adc68df999f87f32a602361247d5819d1edf11ac5a403cfbb609943705844251af85713a17c83a",
+    "PCR2": "fe0a6f7c29c7c4999571869f880b6d5086b377deaaf359e19ae824edacd6a9d90247b793a5f2d73c0e74e2f9630aeb4a",
+    "timestamp": 1743007683,
+    "signature": "MGYCMQD4IaUEajxKLc+nOFEqhjFZMamuJ3rSD4paGO8wXBvS9qztQ9ZPINL7zU4Qpv4De8sCMQDvlFte0Lx/jbt72kIbqnp0DAgGOyppES6mPRCvCDcmsylmM8FXNfcZFFvoqLi03xc="
+  }
+]
