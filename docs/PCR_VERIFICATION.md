@@ -11,6 +11,15 @@ The system uses an append-only history of signed PCR measurements that allows th
 3. **Auditability**: Changes to PCR values over time are tracked
 4. **Flexibility**: New PCR values can be added without requiring frontend updates
 
+## Signature Format
+
+The system uses ECDSA with the P-384 curve and SHA-384 hash function. Signatures are created in raw P1363 format, which is directly compatible with the Web Crypto API used in browsers:
+
+- Signatures are created using ECDSA with the P-384 curve and SHA-384 hash
+- The signature is produced in raw P1363 format (r and s concatenated in fixed 48-byte form)
+- The signature is base64-encoded for storage in the history file
+- No DER-to-raw conversion is needed in the browser
+
 ## Backend Commands
 
 The following commands are available in the justfile:
@@ -22,11 +31,10 @@ just generate-pcr-keys
 ```
 
 This generates an ECDSA key pair (using the P-384 curve) for signing PCR measurements and outputs them to the console:
-- Private key in PEM format
-- Public key in PEM format
-- Private key as base64-encoded string (for setting environment variable)
-- Public key in PEM format as base64-encoded string (for verification)
-- Public key in DER format as base64-encoded string (for Web Crypto API)
+- Private key in PKCS#8 DER format (base64-encoded)
+- Public key in SPKI DER format (base64-encoded for Web Crypto API)
+- Private key in PEM format (for human readability)
+- Public key in PEM format (for human readability)
 
 It also outputs ready-to-use commands for:
 - Setting the SIGNING_PRIVATE_KEY and SIGNING_PUBLIC_KEY environment variables
@@ -139,39 +147,26 @@ async function verifyPcrSignature(
 ): Promise<boolean> {
   const encoder = new TextEncoder();
   
-  // Create the same message format that was signed on the backend
-  // Note: To match our signature implementation, we need to exclude the signature field
-  const dataToSign = {
-    HashAlgorithm: entry.HashAlgorithm,
-    PCR0: entry.PCR0,
-    PCR1: entry.PCR1,
-    PCR2: entry.PCR2,
-    timestamp: entry.timestamp
-  };
+  // Create a copy and remove the signature field
+  const temp = { ...entry };
+  delete temp.signature;
   
-  // Convert to JSON string - must match the exact format used when signing
-  const message = encoder.encode(JSON.stringify(dataToSign));
+  // Convert to JSON string - exactly as it was signed on the backend
+  const dataBuf = encoder.encode(JSON.stringify(temp));
   
-  // Decode the base64 signature
-  const signatureBuf = decodeBase64(entry.signature);
+  // Decode the base64 signature (already in raw P1363 format)
+  const sigBuf = Uint8Array.from(
+    atob(entry.signature),
+    c => c.charCodeAt(0)
+  );
   
   // Verify using Web Crypto API
   return await crypto.subtle.verify(
     { name: 'ECDSA', hash: { name: 'SHA-384' } },
     publicKey,
-    signatureBuf,
-    message
+    sigBuf,
+    dataBuf
   );
-}
-
-// Function to decode base64 to ArrayBuffer
-function decodeBase64(base64: string): ArrayBuffer {
-  const binaryString = atob(base64);
-  const bytes = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
-  return bytes.buffer;
 }
 ```
 
@@ -180,21 +175,24 @@ function decodeBase64(base64: string): ArrayBuffer {
 ```typescript
 async function loadPublicKey(): Promise<CryptoKey> {
   // Use the base64 public key from step 1
-  const publicKeyB64 = PCR_VERIFICATION_PUBLIC_KEY_B64;
+  const publicKeyDerBase64 = PCR_VERIFICATION_PUBLIC_KEY_B64;
   
-  // Decode the base64 key
-  const binaryDer = decodeBase64(publicKeyB64);
+  // Decode the base64 key to Uint8Array
+  const keyData = Uint8Array.from(
+    atob(publicKeyDerBase64),
+    c => c.charCodeAt(0)
+  );
   
   // Import the key
   return await crypto.subtle.importKey(
     'spki', // SubjectPublicKeyInfo format
-    binaryDer,
+    keyData,
     {
       name: 'ECDSA',
       namedCurve: 'P-384' // Must match the curve used to generate the key
     },
-    true, // extractable
-    ['verify'] // only need verification
+    false,
+    ['verify']
   );
 }
 ```
@@ -234,7 +232,26 @@ async function validatePcr(pcr: { PCR0: string, PCR1: string, PCR2: string }): P
 }
 ```
 
-## Security Considerations
+## Implementation Details
+
+### Backend Signing Process
+
+The actual signing is performed by `pcr_sign.py`, which uses Python's cryptography library:
+
+1. The PCR data is signed using ECDSA with SHA-384
+2. Instead of using DER-encoded signatures, we convert to raw P1363 format:
+   - The signature components r and s are extracted from the DER signature
+   - Each component is converted to a fixed 48-byte big-endian integer
+   - The components are concatenated (r|s) to form a 96-byte raw signature
+   - This raw signature is base64-encoded
+
+This approach creates signatures that are directly compatible with the Web Crypto API.
+
+### Key Generation
+
+We generate keys in PKCS#8 DER format for the private key and SPKI DER format for the public key. These formats are base64-encoded for easy storage as environment variables. The public key format is directly compatible with the `crypto.subtle.importKey` API in browsers.
+
+### Security Considerations
 
 1. Keep your private key secure and offline when possible
 2. Only the public key should be accessible to the frontend
@@ -255,14 +272,6 @@ Keep in mind:
 2. **Caching**: GitHub's CDN may cache content for a short period. After pushing updates to the history files, there may be a delay (typically minutes) before the changes are available at the raw URL.
 
 3. **Error Handling**: Your frontend should implement proper error handling if GitHub is temporarily unavailable or if rate limits are exceeded. Consider implementing local caching of the history file to reduce the number of requests.
-
-## Important Implementation Details
-
-- Signatures are created using ECDSA with the P-384 curve and SHA-384 hash
-- The signed data is the JSON string of the PCR entry (without the signature field)
-- The signature in the history file is base64-encoded
-- The frontend must decode this base64 signature before verification
-- We use the Web Crypto API for verification with the importKey() and verify() methods
 
 ## Testing
 

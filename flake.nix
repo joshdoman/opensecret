@@ -35,6 +35,10 @@
           pkgs.just
           pkgs.postgresql
           pkgs.diesel-cli
+          pkgs.python3
+          (pkgs.python3.withPackages (ps: with ps; [
+            cryptography
+          ]))
         ];
         linuxOnlyInputs = [
           pkgs.podman
