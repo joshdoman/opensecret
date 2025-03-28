@@ -290,6 +290,268 @@ copy-pcr-prod:
     cat result/pcr.json
     cp -f result/pcr.json ./pcrProd.json
 
+# Sign and append PCR measurements for dev environment
+append-pcr-dev:
+    #!/usr/bin/env bash
+    set -e
+    
+    # Check for required environment variable
+    if [ -z "${SIGNING_PRIVATE_KEY}" ]; then
+        echo "❌ Error: SIGNING_PRIVATE_KEY environment variable is not set"
+        echo "Please set it with the base64-encoded private key:"
+        echo "export SIGNING_PRIVATE_KEY='...'"
+        exit 1
+    fi
+    
+    # Initialize empty history file if it doesn't exist
+    if [ ! -f "./pcrDevHistory.json" ]; then
+        echo "[]" > ./pcrDevHistory.json
+    fi
+    
+    # Get current PCR values
+    PCR_CONTENT=$(cat ./pcrDev.json | jq -c '.')
+    CURRENT_PCR0=$(echo $PCR_CONTENT | jq -r '.PCR0')
+    
+    # Check if this PCR0 already exists in the history
+    HISTORY=$(cat ./pcrDevHistory.json)
+    PCR0_EXISTS=$(echo $HISTORY | jq --arg pcr0 "$CURRENT_PCR0" 'map(select(.PCR0 == $pcr0)) | length')
+    
+    if [ "$PCR0_EXISTS" -gt "0" ]; then
+        echo "⚠️  PCR0 value already exists in pcrDevHistory.json"
+        echo "    Skipping append operation to avoid duplicates."
+        exit 0
+    fi
+    
+    # Prepare the entry with timestamp
+    TIMESTAMP=$(date +%s)
+    ENTRY=$(echo $PCR_CONTENT | jq --arg ts "$TIMESTAMP" '. + {"timestamp": ($ts | tonumber)}')
+    
+    # Create temporary private key file from the environment variable
+    TEMP_KEY_FILE=$(mktemp)
+    echo "${SIGNING_PRIVATE_KEY}" | base64 --decode > "$TEMP_KEY_FILE"
+    
+    # Sign the entry using the private key
+    SIGNATURE=$(echo -n "$ENTRY" | openssl dgst -sha384 -sign "$TEMP_KEY_FILE" -keyform PEM | base64 -w 0)
+    
+    # Remove temporary key file
+    rm -f "$TEMP_KEY_FILE"
+    
+    # Add signature to the entry
+    SIGNED_ENTRY=$(echo $ENTRY | jq --arg sig "$SIGNATURE" '. + {"signature": $sig}')
+    
+    # Append to history file
+    echo $HISTORY | jq --argjson entry "$SIGNED_ENTRY" '. + [$entry]' > ./pcrDevHistory.json
+    
+    echo "✅ Successfully appended signed PCR entry to pcrDevHistory.json"
+
+# Sign and append PCR measurements for prod environment
+append-pcr-prod:
+    #!/usr/bin/env bash
+    set -e
+    
+    # Check for required environment variable
+    if [ -z "${SIGNING_PRIVATE_KEY}" ]; then
+        echo "❌ Error: SIGNING_PRIVATE_KEY environment variable is not set"
+        echo "Please set it with the base64-encoded private key:"
+        echo "export SIGNING_PRIVATE_KEY='...'"
+        exit 1
+    fi
+    
+    # Initialize empty history file if it doesn't exist
+    if [ ! -f "./pcrProdHistory.json" ]; then
+        echo "[]" > ./pcrProdHistory.json
+    fi
+    
+    # Get current PCR values
+    PCR_CONTENT=$(cat ./pcrProd.json | jq -c '.')
+    CURRENT_PCR0=$(echo $PCR_CONTENT | jq -r '.PCR0')
+    
+    # Check if this PCR0 already exists in the history
+    HISTORY=$(cat ./pcrProdHistory.json)
+    PCR0_EXISTS=$(echo $HISTORY | jq --arg pcr0 "$CURRENT_PCR0" 'map(select(.PCR0 == $pcr0)) | length')
+    
+    if [ "$PCR0_EXISTS" -gt "0" ]; then
+        echo "⚠️  PCR0 value already exists in pcrProdHistory.json"
+        echo "    Skipping append operation to avoid duplicates."
+        exit 0
+    fi
+    
+    # Prepare the entry with timestamp
+    TIMESTAMP=$(date +%s)
+    ENTRY=$(echo $PCR_CONTENT | jq --arg ts "$TIMESTAMP" '. + {"timestamp": ($ts | tonumber)}')
+    
+    # Create temporary private key file from the environment variable
+    TEMP_KEY_FILE=$(mktemp)
+    echo "${SIGNING_PRIVATE_KEY}" | base64 --decode > "$TEMP_KEY_FILE"
+    
+    # Sign the entry using the private key
+    SIGNATURE=$(echo -n "$ENTRY" | openssl dgst -sha384 -sign "$TEMP_KEY_FILE" -keyform PEM | base64 -w 0)
+    
+    # Remove temporary key file
+    rm -f "$TEMP_KEY_FILE"
+    
+    # Add signature to the entry
+    SIGNED_ENTRY=$(echo $ENTRY | jq --arg sig "$SIGNATURE" '. + {"signature": $sig}')
+    
+    # Append to history file
+    echo $HISTORY | jq --argjson entry "$SIGNED_ENTRY" '. + [$entry]' > ./pcrProdHistory.json
+    
+    echo "✅ Successfully appended signed PCR entry to pcrProdHistory.json"
+
+# Update PCR dev with signature and append to history
+update-pcr-dev:
+    just copy-pcr-dev
+    just append-pcr-dev
+    echo "✅ PCR dev values updated and history appended"
+
+# Update PCR prod with signature and append to history
+update-pcr-prod:
+    just copy-pcr-prod
+    just append-pcr-prod
+    echo "✅ PCR prod values updated and history appended"
+
+
+# Generate a key pair for PCR signing and output to terminal (no files created)
+generate-pcr-keys:
+    #!/usr/bin/env bash
+    set -e
+    
+    # Generate private key (using secp384r1/P-384 curve for ECDSA with SHA-384)
+    TEMP_PRIVATE_KEY=$(mktemp)
+    TEMP_PUBLIC_KEY=$(mktemp)
+    TEMP_PUBLIC_KEY_DER=$(mktemp)
+    
+    # Generate the keys
+    openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:secp384r1 -out "$TEMP_PRIVATE_KEY" 2>/dev/null
+    
+    # Extract public key in PEM format
+    openssl ec -in "$TEMP_PRIVATE_KEY" -pubout -out "$TEMP_PUBLIC_KEY" 2>/dev/null
+    
+    # Extract public key in DER format
+    openssl ec -in "$TEMP_PRIVATE_KEY" -pubout -outform DER -out "$TEMP_PUBLIC_KEY_DER" 2>/dev/null
+    
+    # Base64 encode the keys
+    PRIVATE_KEY_BASE64=$(base64 "$TEMP_PRIVATE_KEY" | tr -d '\n')
+    PUBLIC_KEY_BASE64=$(base64 "$TEMP_PUBLIC_KEY" | tr -d '\n')
+    PUBLIC_KEY_DER_BASE64=$(base64 "$TEMP_PUBLIC_KEY_DER" | tr -d '\n')
+    
+    # Output the keys (formatted for readability)
+    echo "===== PRIVATE KEY (PEM) ====="
+    cat "$TEMP_PRIVATE_KEY"
+    echo ""
+    
+    echo "===== PUBLIC KEY (PEM) ====="
+    cat "$TEMP_PUBLIC_KEY"
+    echo ""
+    
+    echo "===== PRIVATE KEY (BASE64) ====="
+    echo "$PRIVATE_KEY_BASE64"
+    echo ""
+    
+    echo "===== PUBLIC KEY (PEM BASE64) ====="
+    echo "$PUBLIC_KEY_BASE64"
+    echo ""
+    
+    echo "===== PUBLIC KEY (DER BASE64 - FOR FRONTEND) ====="
+    echo "$PUBLIC_KEY_DER_BASE64"
+    echo ""
+    
+    echo "===== FOR ENVIRONMENT VARIABLES ====="
+    echo "export SIGNING_PRIVATE_KEY='$PRIVATE_KEY_BASE64'"
+    echo "export SIGNING_PUBLIC_KEY='$PUBLIC_KEY_BASE64'"
+    echo ""
+    
+    echo "===== FOR VERIFICATION ====="
+    echo "just verify-pcr-history dev"
+    echo ""
+    
+    # Clean up temporary files
+    rm "$TEMP_PRIVATE_KEY" "$TEMP_PUBLIC_KEY" "$TEMP_PUBLIC_KEY_DER"
+
+# Verify signatures in a PCR history file using the SIGNING_PUBLIC_KEY environment variable
+verify-pcr-history env:
+    #!/usr/bin/env bash
+    set -e
+    
+    # Check for required environment variable
+    if [ -z "${SIGNING_PUBLIC_KEY}" ]; then
+        echo "❌ Error: SIGNING_PUBLIC_KEY environment variable is not set"
+        echo "Please set it with the base64-encoded public key:"
+        echo "export SIGNING_PUBLIC_KEY='...'"
+        exit 1
+    fi
+    
+    HISTORY_FILE="pcr{{env}}History.json"
+    
+    if [ ! -f "./$HISTORY_FILE" ]; then
+        echo "❌ $HISTORY_FILE doesn't exist"
+        exit 1
+    fi
+    
+    # Create a temporary file for the public key from environment variable
+    TEMP_PUBLIC_KEY=$(mktemp)
+    echo "${SIGNING_PUBLIC_KEY}" | base64 --decode > "$TEMP_PUBLIC_KEY"
+    
+    echo "Verifying signatures in $HISTORY_FILE..."
+    
+    # Process each entry in the history file
+    ENTRIES=$(cat $HISTORY_FILE | jq -c '.[]')
+    COUNT=0
+    VALID=0
+    
+    while IFS= read -r ENTRY; do
+        COUNT=$((COUNT + 1))
+        
+        # Extract data from entry
+        PCR_DATA=$(echo $ENTRY | jq 'del(.signature)')
+        SIGNATURE=$(echo $ENTRY | jq -r '.signature')
+        PCR0=$(echo $ENTRY | jq -r '.PCR0')
+        TIMESTAMP=$(echo $ENTRY | jq -r '.timestamp')
+        
+        # Convert timestamp to human-readable format
+        # Using date --date or date -d instead of date -r for better compatibility
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            # macOS date command
+            TIMESTAMP_HUMAN=$(date -r $TIMESTAMP)
+        else
+            # Linux date command
+            TIMESTAMP_HUMAN=$(date -d "@$TIMESTAMP")
+        fi
+        
+        echo "Entry $COUNT:"
+        echo "  Timestamp: $TIMESTAMP_HUMAN (unix: $TIMESTAMP)"
+        echo "  PCR0: $PCR0"
+        
+        # Save signature as binary
+        TEMP_SIG_FILE=$(mktemp)
+        echo $SIGNATURE | base64 -d > "$TEMP_SIG_FILE"
+        
+        # Verify signature
+        if echo -n "$PCR_DATA" | openssl dgst -sha384 -verify "$TEMP_PUBLIC_KEY" -signature "$TEMP_SIG_FILE" > /dev/null 2>&1; then
+            echo "  ✅ Signature: Valid"
+            VALID=$((VALID + 1))
+        else
+            echo "  ❌ Signature: Invalid"
+        fi
+        
+        # Remove temporary signature file
+        rm -f "$TEMP_SIG_FILE"
+        echo ""
+    done <<< "$ENTRIES"
+    
+    # Clean up
+    rm -f "$TEMP_PUBLIC_KEY"
+    
+    echo "Verification complete: $VALID/$COUNT signatures valid"
+    
+    if [ $VALID -eq $COUNT ]; then
+        echo "✅ All signatures in $HISTORY_FILE are valid"
+        exit 0
+    else
+        echo "❌ Some signatures in $HISTORY_FILE are invalid"
+        exit 1
+    fi
+
 # Internal function for PCR verification
 _verify-pcr-internal env pcr_file:
     #!/usr/bin/env bash
