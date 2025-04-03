@@ -13,12 +13,13 @@ The system uses an append-only history of signed PCR measurements that allows th
 
 ## Signature Format
 
-The system uses ECDSA with the P-384 curve and SHA-384 hash function. Signatures are created in raw P1363 format, which is directly compatible with the Web Crypto API used in browsers:
+The system uses ECDSA with the P-384 curve and SHA-384 hash function:
 
+- **Simplified approach**: Only the PCR0 string value is signed (not the entire JSON object)
 - Signatures are created using ECDSA with the P-384 curve and SHA-384 hash
 - The signature is produced in raw P1363 format (r and s concatenated in fixed 48-byte form)
 - The signature is base64-encoded for storage in the history file
-- No DER-to-raw conversion is needed in the browser
+- No conversion is needed in the browser - the format is directly compatible with Web Crypto API
 
 ## Backend Commands
 
@@ -27,7 +28,7 @@ The following commands are available in the justfile:
 ### Generate Keys
 
 ```bash
-just generate-pcr-keys
+./pcr_sign.js generate-keys
 ```
 
 This generates an ECDSA key pair (using the P-384 curve) for signing PCR measurements and outputs them to the console:
@@ -49,14 +50,14 @@ No files are created on disk - all keys are generated in memory and output to th
 export SIGNING_PRIVATE_KEY='your-base64-encoded-private-key'
 
 # Then run one of these commands
-just update-pcr-dev     # For development PCRs
-just update-pcr-prod    # For production PCRs
+just append-pcr-dev     # For development PCRs
+just append-pcr-prod    # For production PCRs
 ```
 
 These commands:
-1. Copy the latest PCR measurements from the build
-2. Sign the measurements with your private key (from SIGNING_PRIVATE_KEY environment variable)
-3. Append the signed measurements to the history file (if they don't already exist)
+1. Read the PCR measurements from the latest build
+2. Sign the PCR0 value with your private key
+3. Append all PCR values and the signature to the history file (if they don't already exist)
 
 Duplicate PCR0 values are automatically detected and skipped to prevent redundancy.
 
@@ -77,7 +78,7 @@ This verifies all signatures in a PCR history file against the public key in the
 
 1. Generate keys:
    ```bash
-   just generate-pcr-keys
+   ./pcr_sign.js generate-keys
    ```
 
 2. Set the environment variables for the private and public keys:
@@ -86,9 +87,10 @@ This verifies all signatures in a PCR history file against the public key in the
    export SIGNING_PUBLIC_KEY='base64-encoded-public-key-from-previous-step'
    ```
 
-3. Build and update PCR values:
+3. Build and append PCR values:
    ```bash
-   just update-pcr-dev
+   just build-eif-dev  # Build the EIF for dev
+   just append-pcr-dev # Sign and append to history
    ```
 
 4. Commit and push `pcrDevHistory.json` to your repository:
@@ -103,175 +105,276 @@ This verifies all signatures in a PCR history file against the public key in the
    just deploy-dev-nix
    ```
 
-## Frontend/SDK Integration
+## Frontend Integration
 
-These are the steps needed to implement PCR history verification in the SDK:
+The frontend integration uses the Web Crypto API to verify PCR signatures in a simplified way by only verifying the PCR0 value.
 
-1. Store the public key in your frontend code:
+### 1. Public Key Storage
 
-```typescript
-// Base64-encoded DER public key for verifying PCR signatures
-const PCR_VERIFICATION_PUBLIC_KEY_B64 = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEsT4fLLWwA2IyUQbRjhsjz46Ts14mxVzvu8eC68rM7r9b3tZ1yYX311WaQcDOhNbT5vCYivkqA0EXN3aDFSmXHyFzKKxqyOEGBgnRxSBpMQNrc2yumBMDvseiEdCSpQwR";
+Store the SPKI base64-encoded public key in your frontend code:
+
+```javascript
+// The public key in SPKI DER format, base64-encoded (from ./pcr_sign.js generate-keys)
+const PCR_VERIFICATION_PUBLIC_KEY_B64 = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAE...";
 ```
 
-2. Add a helper function to fetch PCR history:
+### 2. Import the Public Key
 
-```typescript
-async function getPcrHistoryList(env: 'dev' | 'prod'): Promise<Array<PcrEntry>> {
-  const url = env === 'dev'
-    ? "https://raw.githubusercontent.com/OpenSecretCloud/opensecret/master/pcrDevHistory.json"
-    : "https://raw.githubusercontent.com/OpenSecretCloud/opensecret/master/pcrProdHistory.json";
-  
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`Couldn't fetch PCR list: ${resp.status}`);
-  return resp.json();
-}
+Create a function to import the public key into the Web Crypto API:
 
-// Define the PCR entry interface
-interface PcrEntry {
-  HashAlgorithm: string;
-  PCR0: string;
-  PCR1: string;
-  PCR2: string;
-  signature: string;
-  timestamp: number;
-}
-```
-
-3. Add a function to verify PCR signatures:
-
-```typescript
-async function verifyPcrSignature(
-  entry: PcrEntry,
-  publicKey: CryptoKey
-): Promise<boolean> {
-  const encoder = new TextEncoder();
-  
-  // Create a copy and remove the signature field
-  const temp = { ...entry };
-  delete temp.signature;
-  
-  // Convert to JSON string - exactly as it was signed on the backend
-  const dataBuf = encoder.encode(JSON.stringify(temp));
-  
-  // Decode the base64 signature (already in raw P1363 format)
-  const sigBuf = Uint8Array.from(
-    atob(entry.signature),
+```javascript
+async function importVerificationKey() {
+  // Decode the base64 key to binary
+  const binaryKey = Uint8Array.from(
+    atob(PCR_VERIFICATION_PUBLIC_KEY_B64),
     c => c.charCodeAt(0)
   );
   
-  // Verify using Web Crypto API
-  return await crypto.subtle.verify(
-    { name: 'ECDSA', hash: { name: 'SHA-384' } },
-    publicKey,
-    sigBuf,
-    dataBuf
-  );
-}
-```
-
-4. Add a function to import the public key:
-
-```typescript
-async function loadPublicKey(): Promise<CryptoKey> {
-  // Use the base64 public key from step 1
-  const publicKeyDerBase64 = PCR_VERIFICATION_PUBLIC_KEY_B64;
-  
-  // Decode the base64 key to Uint8Array
-  const keyData = Uint8Array.from(
-    atob(publicKeyDerBase64),
-    c => c.charCodeAt(0)
-  );
-  
-  // Import the key
+  // Import as SPKI format
   return await crypto.subtle.importKey(
-    'spki', // SubjectPublicKeyInfo format
-    keyData,
+    "spki",                  // The format: SubjectPublicKeyInfo
+    binaryKey.buffer,        // The binary key data
     {
-      name: 'ECDSA',
-      namedCurve: 'P-384' // Must match the curve used to generate the key
+      name: "ECDSA",         // The algorithm
+      namedCurve: "P-384"    // The curve (must be P-384 to match our backend)
     },
-    false,
-    ['verify']
+    false,                   // Not extractable
+    ["verify"]               // Only for verification
   );
 }
 ```
 
-5. Extend your existing PCR validation function:
+### 3. Fetch PCR History
 
-```typescript
-async function validatePcr(pcr: { PCR0: string, PCR1: string, PCR2: string }): Promise<boolean> {
-  // First try local validation with hardcoded values
-  if (isKnownPcr(pcr)) {
-    return true;
+Add a helper function to fetch the PCR history from your repository:
+
+```javascript
+async function fetchPcrHistory(env) {
+  // Replace with your actual repository URL
+  const baseUrl = "https://raw.githubusercontent.com/YourOrg/YourRepo/main";
+  const url = env === 'dev' ? 
+    `${baseUrl}/pcrDevHistory.json` : 
+    `${baseUrl}/pcrProdHistory.json`;
+  
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch PCR history: ${response.status}`);
   }
   
-  // If local validation fails, try the PCR history
+  return await response.json();
+}
+```
+
+### 4. Verify a Signature
+
+This is the function for verifying a PCR0 signature:
+
+```javascript
+async function verifyPcr0Signature(pcr0, signatureBase64, publicKey) {
   try {
-    const env = isDev() ? 'dev' : 'prod';
-    const history = await getPcrHistoryList(env);
-    const publicKey = await loadPublicKey();
+    // 1. Create the verifier with the correct hash algorithm
+    const encoder = new TextEncoder();
+    const pcr0Binary = encoder.encode(pcr0);
     
+    // 2. Convert the base64 signature to binary
+    const signatureBinary = Uint8Array.from(
+      atob(signatureBase64),
+      c => c.charCodeAt(0)
+    );
+    
+    // 3. Verify using Web Crypto API
+    return await crypto.subtle.verify(
+      {
+        name: "ECDSA",
+        hash: { name: "SHA-384" }  // Must match the hash used for signing
+      },
+      publicKey,
+      signatureBinary,
+      pcr0Binary
+    );
+  } catch (error) {
+    console.error("Signature verification error:", error);
+    return false;
+  }
+}
+```
+
+### 5. PCR Validation Function
+
+Create a function to check if a PCR is valid:
+
+```javascript
+async function validatePcr(pcr, env = 'prod') {
+  try {
+    // 1. Import the verification key
+    const publicKey = await importVerificationKey();
+    
+    // 2. Fetch the PCR history
+    const history = await fetchPcrHistory(env);
+    
+    // 3. Find a matching entry in the history
     for (const entry of history) {
-      // Check if PCRs match
-      if (entry.PCR0 === pcr.PCR0 && 
-          entry.PCR1 === pcr.PCR1 && 
+      // Check if PCR values match
+      if (entry.PCR0 === pcr.PCR0 &&
+          entry.PCR1 === pcr.PCR1 &&
           entry.PCR2 === pcr.PCR2) {
-        // Verify signature
-        const isValid = await verifyPcrSignature(entry, publicKey);
+        
+        // 4. Verify the signature (only of PCR0)
+        const isValid = await verifyPcr0Signature(entry.PCR0, entry.signature, publicKey);
         if (isValid) {
-          return true;
+          return {
+            valid: true,
+            timestamp: entry.timestamp,
+            message: `Verified PCR with signature from ${new Date(entry.timestamp * 1000).toLocaleString()}`
+          };
         }
       }
     }
+    
+    // No match found
+    return {
+      valid: false,
+      message: "PCR not found in verified history"
+    };
   } catch (error) {
-    console.error("Error validating PCR against history:", error);
+    console.error("PCR validation error:", error);
+    return {
+      valid: false,
+      message: `Error validating PCR: ${error.message}`
+    };
   }
-  
-  return false;
 }
 ```
 
-## Implementation Details
+### 6. Complete Example
 
-### Backend Signing Process
+Here's a complete example showing how to validate PCRs in a web application:
 
-The actual signing is performed by `pcr_sign.py`, which uses Python's cryptography library:
+```javascript
+// PCR Verification Module
 
-1. The PCR data is signed using ECDSA with SHA-384
-2. Instead of using DER-encoded signatures, we convert to raw P1363 format:
-   - The signature components r and s are extracted from the DER signature
-   - Each component is converted to a fixed 48-byte big-endian integer
-   - The components are concatenated (r|s) to form a 96-byte raw signature
-   - This raw signature is base64-encoded
+// The public key from pcr_sign.js generate-keys output
+const PCR_VERIFICATION_PUBLIC_KEY_B64 = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAE...";
 
-This approach creates signatures that are directly compatible with the Web Crypto API.
+// Import the public key into Web Crypto API
+async function importVerificationKey() {
+  const binaryKey = Uint8Array.from(
+    atob(PCR_VERIFICATION_PUBLIC_KEY_B64),
+    c => c.charCodeAt(0)
+  );
+  
+  return await crypto.subtle.importKey(
+    "spki",
+    binaryKey.buffer,
+    {
+      name: "ECDSA",
+      namedCurve: "P-384"
+    },
+    false,
+    ["verify"]
+  );
+}
 
-### Key Generation
+// Fetch PCR history from repository
+async function fetchPcrHistory(env) {
+  const baseUrl = "https://raw.githubusercontent.com/YourOrg/YourRepo/main";
+  const url = `${baseUrl}/pcr${env.charAt(0).toUpperCase() + env.slice(1)}History.json`;
+  
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch PCR history: ${response.status}`);
+  }
+  
+  return await response.json();
+}
 
-We generate keys in PKCS#8 DER format for the private key and SPKI DER format for the public key. These formats are base64-encoded for easy storage as environment variables. The public key format is directly compatible with the `crypto.subtle.importKey` API in browsers.
+// Verify a single PCR0 signature
+async function verifyPcr0Signature(pcr0, signatureBase64, publicKey) {
+  // Convert PCR0 string to binary
+  const encoder = new TextEncoder();
+  const pcr0Binary = encoder.encode(pcr0);
+  
+  // Convert signature from base64 to binary
+  const signatureBinary = Uint8Array.from(
+    atob(signatureBase64),
+    c => c.charCodeAt(0)
+  );
+  
+  // Verify
+  try {
+    return await crypto.subtle.verify(
+      {
+        name: "ECDSA",
+        hash: { name: "SHA-384" }
+      },
+      publicKey,
+      signatureBinary,
+      pcr0Binary
+    );
+  } catch (error) {
+    console.error("Verification error:", error);
+    return false;
+  }
+}
 
-### Security Considerations
+// Main validation function
+async function validatePcr(pcr, env = 'prod') {
+  try {
+    // Load key and history
+    const [publicKey, history] = await Promise.all([
+      importVerificationKey(),
+      fetchPcrHistory(env)
+    ]);
+    
+    // Check for matches
+    for (const entry of history) {
+      if (entry.PCR0 === pcr.PCR0 &&
+          entry.PCR1 === pcr.PCR1 &&
+          entry.PCR2 === pcr.PCR2) {
+        
+        const isValid = await verifyPcr0Signature(entry.PCR0, entry.signature, publicKey);
+        if (isValid) {
+          return {
+            valid: true,
+            timestamp: entry.timestamp,
+            verifiedAt: new Date(entry.timestamp * 1000).toLocaleString()
+          };
+        }
+      }
+    }
+    
+    return { valid: false };
+  } catch (error) {
+    console.error("PCR validation failed:", error);
+    return { valid: false, error: error.message };
+  }
+}
 
-1. Keep your private key secure and offline when possible
-2. Only the public key should be accessible to the frontend
-3. The history files are append-only; never remove entries
-4. Always verify signatures before trusting PCR values
-5. Duplicate PCR0 values are automatically prevented on the backend
+// Example usage:
+async function checkPcr() {
+  const pcr = {
+    PCR0: "cc88f0edbccb5c92a46a2c4ba542c624123a793b002d1150153def94e34f3daa288f70162a8d163c5d36b31269624cb7", 
+    PCR1: "e45de6f4e9809176f6adc68df999f87f32a602361247d5819d1edf11ac5a403cfbb609943705844251af85713a17c83a",
+    PCR2: "7f3c7df92680edd708d19a25784d18883381cc34e16d3fe9079f7f117970ccb2eb4f403875f1340558f86a58edcdcea9"
+  };
+  
+  const result = await validatePcr(pcr, 'dev');
+  console.log("PCR valid?", result.valid);
+  if (result.valid) {
+    console.log("Verified at:", result.verifiedAt);
+  }
+}
+```
 
-## GitHub Hosting Considerations
+### Key Advantages of this Approach
 
-The PCR history files are hosted on GitHub at these URLs:
-- Dev: `https://raw.githubusercontent.com/OpenSecretCloud/opensecret/master/pcrDevHistory.json`
-- Prod: `https://raw.githubusercontent.com/OpenSecretCloud/opensecret/master/pcrProdHistory.json`
+1. **Simplicity**: By signing only the PCR0 string value rather than a JSON object, we eliminate issues with JSON formatting, whitespace, and field ordering.
 
-Keep in mind:
+2. **Reliability**: The signature verification is much more reliable since it's based on a simple string rather than a complex JSON structure that could vary between signing and verification.
 
-1. **Rate Limiting**: GitHub applies rate limits of 60 requests per hour per IP address for raw content. This is usually sufficient for most applications, as the limit applies per user, not globally.
+3. **Performance**: Signing and verifying a simple string is more efficient than working with JSON objects.
 
-2. **Caching**: GitHub's CDN may cache content for a short period. After pushing updates to the history files, there may be a delay (typically minutes) before the changes are available at the raw URL.
-
-3. **Error Handling**: Your frontend should implement proper error handling if GitHub is temporarily unavailable or if rate limits are exceeded. Consider implementing local caching of the history file to reduce the number of requests.
+4. **Security**: The PCR0 value is the most important measurement that identifies the enclave. By signing it directly, we maintain the security guarantee while simplifying the implementation.
 
 ## Testing
 

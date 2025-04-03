@@ -298,14 +298,16 @@ append-pcr-dev:
     # Check for required environment variable
     if [ -z "${SIGNING_PRIVATE_KEY}" ]; then
         echo "❌ Error: SIGNING_PRIVATE_KEY environment variable is not set"
-        echo "Please set it with the base64-encoded private key:"
+        echo "Please generate keys with: ./pcr_sign.js generate-keys"
+        echo "Then set the environment variables with:"
         echo "export SIGNING_PRIVATE_KEY='...'"
+        echo "export SIGNING_PUBLIC_KEY='...'"
         exit 1
     fi
     
-    # Check if the python script exists and is executable
-    if [ ! -x "./pcr_sign.py" ]; then
-        chmod +x ./pcr_sign.py
+    # Check if the Node.js script exists and is executable
+    if [ ! -x "./pcr_sign.js" ]; then
+        chmod +x ./pcr_sign.js
     fi
     
     # Initialize empty history file if it doesn't exist
@@ -314,8 +316,10 @@ append-pcr-dev:
     fi
     
     # Get current PCR values
-    PCR_CONTENT=$(cat ./pcrDev.json | jq -c '.')
+    PCR_CONTENT=$(cat ./pcrDev.json)
     CURRENT_PCR0=$(echo $PCR_CONTENT | jq -r '.PCR0')
+    CURRENT_PCR1=$(echo $PCR_CONTENT | jq -r '.PCR1')
+    CURRENT_PCR2=$(echo $PCR_CONTENT | jq -r '.PCR2')
     
     # Check if this PCR0 already exists in the history
     HISTORY=$(cat ./pcrDevHistory.json)
@@ -327,20 +331,39 @@ append-pcr-dev:
         exit 0
     fi
     
-    # Prepare the entry with timestamp
+    # Generate a timestamp
     TIMESTAMP=$(date +%s)
-    ENTRY=$(echo $PCR_CONTENT | jq --arg ts "$TIMESTAMP" '. + {"timestamp": ($ts | tonumber)}')
     
-    # Sign the entry using the Python script with raw P1363 format
-    SIGNATURE=$(./pcr_sign.py sign "${SIGNING_PRIVATE_KEY}" "$ENTRY" | grep "Signature" | cut -d ":" -f 2- | xargs)
+    # Sign just the PCR0 value
+    echo "Signing PCR0: $CURRENT_PCR0"
+    SIGNATURE=$(./pcr_sign.js sign-pcr0 "$CURRENT_PCR0")
     
-    # Add signature to the entry
-    SIGNED_ENTRY=$(echo $ENTRY | jq --arg sig "$SIGNATURE" '. + {"signature": $sig}')
+    if [ -z "$SIGNATURE" ]; then
+        echo "❌ Error: Failed to create signature"
+        exit 1
+    fi
+    
+    # Create a new history entry
+    NEW_ENTRY=$(jq -n \
+      --arg pcr0 "$CURRENT_PCR0" \
+      --arg pcr1 "$CURRENT_PCR1" \
+      --arg pcr2 "$CURRENT_PCR2" \
+      --arg sig "$SIGNATURE" \
+      --arg ts "$TIMESTAMP" \
+      '{
+        "PCR0": $pcr0, 
+        "PCR1": $pcr1, 
+        "PCR2": $pcr2, 
+        "timestamp": ($ts | tonumber),
+        "signature": $sig
+      }')
     
     # Append to history file
-    echo $HISTORY | jq --argjson entry "$SIGNED_ENTRY" '. + [$entry]' > ./pcrDevHistory.json
+    echo $HISTORY | jq --argjson entry "$NEW_ENTRY" '. + [$entry]' > ./pcrDevHistory.json
     
     echo "✅ Successfully appended signed PCR entry to pcrDevHistory.json"
+    echo "   PCR0: $CURRENT_PCR0"
+    echo "   Timestamp: $TIMESTAMP"
 
 # Sign and append PCR measurements for prod environment
 append-pcr-prod:
@@ -350,14 +373,16 @@ append-pcr-prod:
     # Check for required environment variable
     if [ -z "${SIGNING_PRIVATE_KEY}" ]; then
         echo "❌ Error: SIGNING_PRIVATE_KEY environment variable is not set"
-        echo "Please set it with the base64-encoded private key:"
+        echo "Please generate keys with: ./pcr_sign.js generate-keys"
+        echo "Then set the environment variables with:"
         echo "export SIGNING_PRIVATE_KEY='...'"
+        echo "export SIGNING_PUBLIC_KEY='...'"
         exit 1
     fi
     
-    # Check if the python script exists and is executable
-    if [ ! -x "./pcr_sign.py" ]; then
-        chmod +x ./pcr_sign.py
+    # Check if the Node.js script exists and is executable
+    if [ ! -x "./pcr_sign.js" ]; then
+        chmod +x ./pcr_sign.js
     fi
     
     # Initialize empty history file if it doesn't exist
@@ -366,8 +391,10 @@ append-pcr-prod:
     fi
     
     # Get current PCR values
-    PCR_CONTENT=$(cat ./pcrProd.json | jq -c '.')
+    PCR_CONTENT=$(cat ./pcrProd.json)
     CURRENT_PCR0=$(echo $PCR_CONTENT | jq -r '.PCR0')
+    CURRENT_PCR1=$(echo $PCR_CONTENT | jq -r '.PCR1')
+    CURRENT_PCR2=$(echo $PCR_CONTENT | jq -r '.PCR2')
     
     # Check if this PCR0 already exists in the history
     HISTORY=$(cat ./pcrProdHistory.json)
@@ -379,20 +406,39 @@ append-pcr-prod:
         exit 0
     fi
     
-    # Prepare the entry with timestamp
+    # Generate a timestamp
     TIMESTAMP=$(date +%s)
-    ENTRY=$(echo $PCR_CONTENT | jq --arg ts "$TIMESTAMP" '. + {"timestamp": ($ts | tonumber)}')
     
-    # Sign the entry using the Python script with raw P1363 format
-    SIGNATURE=$(./pcr_sign.py sign "${SIGNING_PRIVATE_KEY}" "$ENTRY" | grep "Signature" | cut -d ":" -f 2- | xargs)
+    # Sign just the PCR0 value
+    echo "Signing PCR0: $CURRENT_PCR0"
+    SIGNATURE=$(./pcr_sign.js sign-pcr0 "$CURRENT_PCR0")
     
-    # Add signature to the entry
-    SIGNED_ENTRY=$(echo $ENTRY | jq --arg sig "$SIGNATURE" '. + {"signature": $sig}')
+    if [ -z "$SIGNATURE" ]; then
+        echo "❌ Error: Failed to create signature"
+        exit 1
+    fi
+    
+    # Create a new history entry
+    NEW_ENTRY=$(jq -n \
+      --arg pcr0 "$CURRENT_PCR0" \
+      --arg pcr1 "$CURRENT_PCR1" \
+      --arg pcr2 "$CURRENT_PCR2" \
+      --arg sig "$SIGNATURE" \
+      --arg ts "$TIMESTAMP" \
+      '{
+        "PCR0": $pcr0, 
+        "PCR1": $pcr1, 
+        "PCR2": $pcr2, 
+        "timestamp": ($ts | tonumber),
+        "signature": $sig
+      }')
     
     # Append to history file
-    echo $HISTORY | jq --argjson entry "$SIGNED_ENTRY" '. + [$entry]' > ./pcrProdHistory.json
+    echo $HISTORY | jq --argjson entry "$NEW_ENTRY" '. + [$entry]' > ./pcrProdHistory.json
     
     echo "✅ Successfully appended signed PCR entry to pcrProdHistory.json"
+    echo "   PCR0: $CURRENT_PCR0"
+    echo "   Timestamp: $TIMESTAMP"
 
 # Update PCR dev with signature and append to history
 update-pcr-dev:
@@ -412,89 +458,40 @@ generate-pcr-keys:
     #!/usr/bin/env bash
     set -e
     
-    # Check if the python script exists and is executable
-    if [ ! -x "./pcr_sign.py" ]; then
-        chmod +x ./pcr_sign.py
+    # Check if the Node.js script exists and is executable
+    if [ ! -x "./pcr_sign.js" ]; then
+        chmod +x ./pcr_sign.js
     fi
     
-    # Generate the keys using the Python script just once
-    # The script already outputs all the necessary information
-    ./pcr_sign.py generate-keys
+    # Generate the keys using the Node.js script
+    ./pcr_sign.js generate-keys
 
 # Verify signatures in a PCR history file using the SIGNING_PUBLIC_KEY environment variable
 verify-pcr-history env:
     #!/usr/bin/env bash
     set -e
     
-    # This script now uses the frontend's verification logic
-    # The signatures are already in raw P1363 format and can be verified using Web Crypto API
-    
-    # Check if the python script exists
-    if [ ! -x "./pcr_sign.py" ]; then
-        chmod +x ./pcr_sign.py
+    # Check if the Node.js script exists and is executable
+    if [ ! -x "./pcr_verify.js" ]; then
+        chmod +x ./pcr_verify.js
     fi
     
     # Check for required environment variable
     if [ -z "${SIGNING_PUBLIC_KEY}" ]; then
         echo "❌ Error: SIGNING_PUBLIC_KEY environment variable is not set"
-        echo "Please set it with the base64-encoded public key:"
+        echo "Please generate keys with: ./pcr_sign.js generate-keys"
+        echo "Then set the environment variables with:"
+        echo "export SIGNING_PRIVATE_KEY='...'"
         echo "export SIGNING_PUBLIC_KEY='...'"
         exit 1
     fi
     
-    HISTORY_FILE="pcr{{env}}History.json"
+    # Display the first few characters of the public key for debugging
+    PUBLIC_KEY_PREFIX="${SIGNING_PUBLIC_KEY:0:20}..."
+    echo "Verifying signatures using public key: $PUBLIC_KEY_PREFIX"
     
-    if [ ! -f "./$HISTORY_FILE" ]; then
-        echo "❌ $HISTORY_FILE doesn't exist"
-        exit 1
-    fi
-    
-    echo "Verifying signatures in $HISTORY_FILE..."
-    
-    # Process each entry in the history file
-    ENTRIES=$(cat $HISTORY_FILE | jq -c '.[]')
-    COUNT=0
-    VALID=0
-    
-    while IFS= read -r ENTRY; do
-        COUNT=$((COUNT + 1))
-        
-        # Extract data from entry
-        PCR_DATA=$(echo $ENTRY | jq 'del(.signature)')
-        SIGNATURE=$(echo $ENTRY | jq -r '.signature')
-        PCR0=$(echo $ENTRY | jq -r '.PCR0')
-        TIMESTAMP=$(echo $ENTRY | jq -r '.timestamp')
-        
-        # Convert timestamp to human-readable format
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            # macOS date command
-            TIMESTAMP_HUMAN=$(date -r $TIMESTAMP)
-        else
-            # Linux date command
-            TIMESTAMP_HUMAN=$(date -d "@$TIMESTAMP")
-        fi
-        
-        echo "Entry $COUNT:"
-        echo "  Timestamp: $TIMESTAMP_HUMAN (unix: $TIMESTAMP)"
-        echo "  PCR0: $PCR0"
-        
-        echo "  NOTE: Backend verification not implemented yet in Python script"
-        echo "  The signatures are in raw P1363 format and can be verified by the frontend"
-        echo "  ✅ Signature: Assumed Valid"
-        VALID=$((VALID + 1))
-        
-        echo ""
-    done <<< "$ENTRIES"
-    
-    echo "Verification complete: $VALID/$COUNT signatures valid"
-    
-    if [ $VALID -eq $COUNT ]; then
-        echo "✅ All signatures in $HISTORY_FILE are valid"
-        exit 0
-    else
-        echo "❌ Some signatures in $HISTORY_FILE are invalid"
-        exit 1
-    fi
+    # Run the verification script
+    ./pcr_verify.js {{env}}
 
 # Internal function for PCR verification
 _verify-pcr-internal env pcr_file:
