@@ -1,9 +1,12 @@
+use crate::apple_signin::validate_apple_native_token;
 use crate::models::oauth::NewUserOAuthConnection;
 use crate::oauth::OAuthState;
 use crate::web::encryption_middleware::{decrypt_request, encrypt_response, EncryptedResponse};
 use crate::web::login_routes::handle_new_user_registration;
-use crate::web::platform::PROJECT_GITHUB_OAUTH_SECRET;
-use crate::web::platform::PROJECT_GOOGLE_OAUTH_SECRET;
+use crate::web::platform::common::{
+    PROJECT_APPLE_CLIENT_ID, PROJECT_APPLE_OAUTH_SECRET, PROJECT_GITHUB_OAUTH_SECRET,
+    PROJECT_GOOGLE_OAUTH_SECRET,
+};
 use crate::GithubProvider;
 use crate::GoogleProvider;
 use crate::{decrypt_with_key, private_key::generate_twelve_word_seed};
@@ -67,6 +70,31 @@ pub fn router(app_state: Arc<AppState>) -> Router {
                 ),
             ),
         )
+        .route(
+            "/auth/apple",
+            post(|state, ext1, ext2| initiate_oauth(state, ext1, ext2, "apple")).layer(
+                axum::middleware::from_fn_with_state(
+                    app_state.clone(),
+                    decrypt_request::<OAuthAuthRequest>,
+                ),
+            ),
+        )
+        .route(
+            "/auth/apple/callback",
+            post(|state, ext1, ext2| oauth_callback(state, ext1, ext2, "apple")).layer(
+                axum::middleware::from_fn_with_state(
+                    app_state.clone(),
+                    decrypt_request::<OAuthCallbackRequest>,
+                ),
+            ),
+        )
+        .route(
+            "/auth/apple/native",
+            post(handle_apple_native_signin).layer(axum::middleware::from_fn_with_state(
+                app_state.clone(),
+                decrypt_request::<AppleNativeSignInRequest>,
+            )),
+        )
         .with_state(app_state)
 }
 
@@ -95,6 +123,16 @@ pub struct OAuthCallbackResponse {
     refresh_token: String,
 }
 
+#[derive(Deserialize, Clone)]
+pub struct AppleNativeSignInRequest {
+    pub identity_token: String,      // JWT from Apple
+    pub user_identifier: String,     // Apple's unique user ID (sub)
+    pub email: Option<String>,       // Email (only provided on first sign-in)
+    pub given_name: Option<String>,  // First name (only provided on first sign-in)
+    pub family_name: Option<String>, // Last name (only provided on first sign-in)
+    pub client_id: Uuid,             // Your app's client ID for the project
+}
+
 #[derive(Deserialize, Clone, Debug)]
 struct GithubUser {
     id: i64,
@@ -115,6 +153,14 @@ struct GoogleUser {
     sub: String,
     email: String,
     email_verified: bool,
+    name: Option<String>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct AppleUser {
+    sub: String,
+    email: Option<String>,
+    email_verified: Option<bool>,
     name: Option<String>,
 }
 
@@ -152,6 +198,17 @@ async fn get_project_oauth_client(
                 .db
                 .get_org_project_secret_by_key_name_and_project(
                     PROJECT_GOOGLE_OAUTH_SECRET,
+                    project_id,
+                )?;
+            (enabled, settings, secret)
+        }
+        "apple" => {
+            let enabled = oauth_settings.apple_oauth_enabled;
+            let settings = oauth_settings.apple_oauth_settings;
+            let secret = app_state
+                .db
+                .get_org_project_secret_by_key_name_and_project(
+                    PROJECT_APPLE_OAUTH_SECRET,
                     project_id,
                 )?;
             (enabled, settings, secret)
@@ -400,6 +457,148 @@ pub async fn oauth_callback(
             )
             .await?
         }
+        "apple" => {
+            debug!("Access token obtained, processing Apple ID token");
+
+            // Verify we have a valid Apple provider
+            let _apple_provider = oauth_provider.as_apple().ok_or_else(|| {
+                error!("Failed to get AppleProvider");
+                ApiError::InternalServerError
+            })?;
+
+            // Get Apple client ID for validation
+            let client_id_secret = app_state
+                .db
+                .get_org_project_secret_by_key_name_and_project(
+                    PROJECT_APPLE_CLIENT_ID,
+                    project.id,
+                )?
+                .ok_or_else(|| {
+                    error!("Apple client ID not found for project");
+                    ApiError::BadRequest
+                })?;
+
+            // Decrypt the client ID
+            let secret_key = SecretKey::from_slice(&app_state.enclave_key)
+                .map_err(|_| ApiError::EncryptionError)?;
+
+            let client_id = String::from_utf8(
+                decrypt_with_key(&secret_key, &client_id_secret.secret_enc)
+                    .map_err(|_| ApiError::EncryptionError)?,
+            )
+            .map_err(|_| ApiError::EncryptionError)?;
+
+            // For Apple, we need to extract the ID token from the token exchange response
+            debug!("Processing Apple OAuth token response to get ID token");
+
+            // Extract the ID token from the response
+            // The OAuth2 crate doesn't provide direct access to id_token via a method,
+            // so we need to cast to a JsonTokenResponse to access it
+            let id_token = match serde_json::from_value::<serde_json::Value>(serde_json::json!(
+                token.extra_fields()
+            )) {
+                Ok(json) => json
+                    .get("id_token")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| {
+                        error!("No id_token found in Apple OAuth response");
+                        ApiError::InternalServerError
+                    })?,
+                Err(e) => {
+                    error!("Failed to parse token extra fields: {:?}", e);
+                    return Err(ApiError::InternalServerError);
+                }
+            };
+
+            // Verify the token just like we do for native sign-in
+            let apple_user = match fetch_apple_user(&app_state, &id_token, &client_id).await {
+                Ok(user) => {
+                    debug!("Successfully verified Apple ID token");
+                    user
+                }
+                Err(e) => {
+                    error!("Failed to verify Apple ID token: {:?}", e);
+                    return Err(e);
+                }
+            };
+
+            // For Apple, we need a special approach:
+            // 1. First, try to find any existing users with this Apple ID
+            // 2. If found, just use that user - no need for email
+            // 3. Only if this is a first-time user, we need an email
+
+            let sub = apple_user.sub.clone();
+
+            // Get the Apple provider from the database to get its ID
+            let apple_db_provider = app_state
+                .db
+                .get_oauth_provider_by_name("apple")
+                .map_err(|e| {
+                    error!("Failed to get Apple OAuth provider: {:?}", e);
+                    ApiError::InternalServerError
+                })?
+                .ok_or_else(|| {
+                    error!("Apple OAuth provider not found");
+                    ApiError::InternalServerError
+                })?;
+
+            // Directly query for a user with this Apple ID
+            let existing_user = if let Some(connection) = app_state
+                .db
+                .get_user_oauth_connection_by_provider_and_provider_user_id(
+                    apple_db_provider.id,
+                    &sub,
+                )? {
+                // Found a connection - get the user
+                debug!("Found existing connection for Apple ID: {}", sub);
+
+                let user = app_state.db.get_user_by_uuid(connection.user_id)?;
+
+                // Update the connection with the new token
+                update_provider_connection(&app_state, &user, apple_db_provider.id, &access_token)
+                    .await?;
+
+                Some(user)
+            } else {
+                // No existing connection found
+                debug!("No existing connection found for Apple ID: {}", sub);
+                None
+            };
+
+            // If user was found, return that user
+            if let Some(user) = existing_user {
+                debug!("Using existing user for Apple OAuth");
+                user
+            } else {
+                // For new users, we absolutely need a valid email (not empty)
+                debug!(
+                    "No existing user found with Apple ID: {}, creating new user",
+                    sub
+                );
+
+                // Make sure we have a non-empty email
+                let email = apple_user
+                    .email
+                    .clone()
+                    .filter(|e| !e.is_empty())
+                    .ok_or_else(|| {
+                        error!("No valid email found in Apple token for new user");
+                        ApiError::NoEmailFound
+                    })?;
+
+                find_or_create_user_from_oauth(
+                    &app_state,
+                    email,
+                    sub,
+                    "apple",
+                    access_token,
+                    apple_user.name.clone(),
+                    project.id,
+                )
+                .await?
+            }
+        }
         _ => {
             error!("Unsupported provider: {}", provider_name);
             return Err(ApiError::InternalServerError);
@@ -589,6 +788,37 @@ async fn fetch_google_user(
     Ok(google_user)
 }
 
+async fn fetch_apple_user(
+    app_state: &AppState,
+    id_token: &str,
+    client_id: &str,
+) -> Result<AppleUser, ApiError> {
+    debug!("Parsing and validating Apple ID token");
+
+    // Validate the token using the shared verifier
+    let claims =
+        validate_apple_native_token(&app_state.apple_jwt_verifier, id_token, client_id).await?;
+
+    // Create an AppleUser from the claims
+    let apple_user = AppleUser {
+        sub: claims.sub,
+        email: claims.email,
+        email_verified: claims.email_verified,
+        name: None, // Apple doesn't include name in JWT, name comes from frontend
+    };
+
+    // Check if we have an email and it's verified
+    if let Some(email) = &apple_user.email {
+        if !email.is_empty() && apple_user.email_verified.unwrap_or(false) {
+            return Ok(apple_user);
+        }
+    }
+
+    // If we reach here, we either don't have an email or it's not verified
+    error!("Apple user email is not present or not verified");
+    Err(ApiError::NoEmailFound)
+}
+
 async fn find_or_create_user_from_oauth(
     app_state: &AppState,
     email: String,
@@ -685,6 +915,186 @@ async fn find_or_create_user_from_oauth(
             Err(ApiError::InternalServerError)
         }
     }
+}
+
+/// Handler for Apple native sign-in (iOS Sign in with Apple)
+pub async fn handle_apple_native_signin(
+    State(app_state): State<Arc<AppState>>,
+    Extension(request): Extension<AppleNativeSignInRequest>,
+    Extension(session_id): Extension<Uuid>,
+) -> Result<Json<EncryptedResponse<OAuthCallbackResponse>>, ApiError> {
+    debug!("Handling Apple native sign-in");
+
+    // Get project
+    let project = app_state
+        .db
+        .get_org_project_by_client_id(request.client_id)
+        .map_err(|_| ApiError::BadRequest)?;
+
+    // Get Apple client ID for this project (Bundle ID)
+    let apple_client_id = app_state
+        .db
+        .get_org_project_secret_by_key_name_and_project(PROJECT_APPLE_CLIENT_ID, project.id)?
+        .ok_or_else(|| {
+            error!("Apple client ID not found for project");
+            ApiError::BadRequest
+        })?;
+
+    // Decrypt the client ID
+    let secret_key = SecretKey::from_slice(&app_state.enclave_key).map_err(|_| {
+        error!("Failed to create secret key from enclave key");
+        ApiError::InternalServerError
+    })?;
+
+    let client_id = String::from_utf8(
+        decrypt_with_key(&secret_key, &apple_client_id.secret_enc).map_err(|_| {
+            error!("Failed to decrypt Apple client ID");
+            ApiError::InternalServerError
+        })?,
+    )
+    .map_err(|_| {
+        error!("Failed to parse decrypted Apple client ID as UTF-8");
+        ApiError::InternalServerError
+    })?;
+
+    // Verify the Apple JWT token using the shared verifier
+    debug!("Verifying Apple identity token");
+    let claims = validate_apple_native_token(
+        &app_state.apple_jwt_verifier,
+        &request.identity_token,
+        &client_id,
+    )
+    .await?;
+
+    // Verify the sub from the token matches the user_identifier
+    if claims.sub != request.user_identifier {
+        error!("User identifier mismatch in Apple token");
+        return Err(ApiError::BadRequest);
+    }
+
+    // Get the Apple provider from the database
+    let apple_provider = app_state
+        .db
+        .get_oauth_provider_by_name("apple")
+        .map_err(|e| {
+            error!("Failed to get Apple OAuth provider: {:?}", e);
+            ApiError::InternalServerError
+        })?
+        .ok_or_else(|| {
+            error!("Apple OAuth provider not found");
+            ApiError::InternalServerError
+        })?;
+
+    // Access token is the identity token itself (not ideal but works for now)
+    let access_token = request.identity_token.clone();
+
+    // For Apple, we need a special approach:
+    // 1. First, try to find any existing users with this Apple ID
+    // 2. If found, just use that user - no need for email
+    // 3. Only if this is a first-time user, we need an email
+
+    // Directly query for existing connection with this Apple ID
+    if let Some(connection) = app_state
+        .db
+        .get_user_oauth_connection_by_provider_and_provider_user_id(
+            apple_provider.id,
+            &claims.sub,
+        )?
+    {
+        // Found a connection - get the user
+        debug!("Found existing connection for Apple ID: {}", claims.sub);
+
+        let user = app_state.db.get_user_by_uuid(connection.user_id)?;
+
+        // Update the connection with the new token
+        update_provider_connection(&app_state, &user, apple_provider.id, &access_token).await?;
+
+        // Generate JWT tokens
+        let access_token = NewToken::new(&user, TokenType::Access, &app_state).map_err(|e| {
+            error!("Failed to generate access token: {:?}", e);
+            ApiError::InternalServerError
+        })?;
+
+        let refresh_token = NewToken::new(&user, TokenType::Refresh, &app_state).map_err(|e| {
+            error!("Failed to generate refresh token: {:?}", e);
+            ApiError::InternalServerError
+        })?;
+
+        let auth_response = OAuthCallbackResponse {
+            id: user.get_id(),
+            email: user
+                .get_email()
+                .expect("OAuth user must have email")
+                .to_string(),
+            access_token: access_token.token,
+            refresh_token: refresh_token.token,
+        };
+
+        debug!("Apple sign-in successful for existing user");
+        return encrypt_response(&app_state, &session_id, &auth_response).await;
+    }
+
+    // If we get here, user doesn't exist - need to create new user
+    debug!(
+        "No existing user found with Apple ID: {}, creating new user",
+        claims.sub
+    );
+
+    // For new users, we absolutely need an email
+    // Determine the email to use - prioritize the one from the token if available
+    // Make sure we actually have an email - don't allow empty strings
+    let email = claims
+        .email
+        .or(request.email.clone())
+        .filter(|e| !e.is_empty())
+        .ok_or_else(|| {
+            error!("No valid email found in Apple token or request for new user");
+            ApiError::NoEmailFound
+        })?;
+
+    // Construct a name from given_name and family_name if provided
+    let user_name = match (request.given_name.clone(), request.family_name.clone()) {
+        (Some(given), Some(family)) => Some(format!("{} {}", given, family)),
+        (Some(given), None) => Some(given),
+        (None, Some(family)) => Some(family),
+        (None, None) => None,
+    };
+
+    // Create the new user
+    let user = find_or_create_user_from_oauth(
+        &app_state,
+        email,
+        claims.sub,
+        "apple",
+        access_token,
+        user_name,
+        project.id,
+    )
+    .await?;
+
+    // Generate JWT tokens
+    let access_token = NewToken::new(&user, TokenType::Access, &app_state).map_err(|e| {
+        error!("Failed to generate access token: {:?}", e);
+        ApiError::InternalServerError
+    })?;
+
+    let refresh_token = NewToken::new(&user, TokenType::Refresh, &app_state).map_err(|e| {
+        error!("Failed to generate refresh token: {:?}", e);
+        ApiError::InternalServerError
+    })?;
+
+    let auth_response = OAuthCallbackResponse {
+        id: user.get_id(),
+        email: user
+            .get_email()
+            .expect("OAuth user must have email")
+            .to_string(),
+        access_token: access_token.token,
+        refresh_token: refresh_token.token,
+    };
+
+    debug!("Apple native sign-in successful for new user");
+    encrypt_response(&app_state, &session_id, &auth_response).await
 }
 
 async fn update_provider_connection(

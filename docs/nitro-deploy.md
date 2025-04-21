@@ -479,6 +479,54 @@ sudo systemctl restart vsock-google-oauth-proxy.service
 sudo systemctl restart vsock-google-api-proxy.service
 ```
 
+## Vsock Apple OAuth proxy
+Create a vsock proxy service so that enclave program can talk to Apple OAuth:
+
+First configure the endpoint into its allowlist:
+
+```
+sudo vim /etc/nitro_enclaves/vsock-proxy.yaml
+```
+
+Add this line:
+```
+- {address: appleid.apple.com, port: 443}
+```
+
+Now create a service that spins this up automatically:
+
+```
+sudo vim /etc/systemd/system/vsock-apple-proxy.service
+```
+
+```
+[Unit]
+Description=Vsock Apple OAuth Proxy Service
+After=network.target
+
+[Service]
+User=root
+ExecStart=/usr/bin/vsock-proxy 8018 appleid.apple.com 443
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Activate service:
+
+```
+sudo systemctl daemon-reload
+sudo systemctl enable vsock-apple-proxy.service
+sudo systemctl start vsock-apple-proxy.service
+sudo systemctl status vsock-apple-proxy.service
+```
+
+A restart of this should not be needed but if you need to:
+```
+sudo systemctl restart vsock-apple-proxy.service
+```
+
 ## Vsock Resend proxy
 Create a vsock proxy service so that enclave program can talk to resend:
 

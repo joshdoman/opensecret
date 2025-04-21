@@ -12,6 +12,8 @@ use validator::Validate;
 pub const PROJECT_RESEND_API_KEY: &str = "RESEND_API_KEY";
 pub const PROJECT_GOOGLE_OAUTH_SECRET: &str = "GOOGLE_OAUTH_SECRET";
 pub const PROJECT_GITHUB_OAUTH_SECRET: &str = "GITHUB_OAUTH_SECRET";
+pub const PROJECT_APPLE_OAUTH_SECRET: &str = "APPLE_OAUTH_SECRET";
+pub const PROJECT_APPLE_CLIENT_ID: &str = "APPLE_CLIENT_ID";
 pub const THIRD_PARTY_JWT_SECRET: &str = "THIRD_PARTY_JWT_SECRET";
 
 // Request Types
@@ -85,10 +87,13 @@ pub struct UpdateEmailSettingsRequest {
 pub struct UpdateOAuthSettingsRequest {
     pub google_oauth_enabled: bool,
     pub github_oauth_enabled: bool,
+    pub apple_oauth_enabled: bool,
     #[validate(custom(function = "validate_oauth_provider_settings"))]
     pub google_oauth_settings: Option<OAuthProviderSettings>,
     #[validate(custom(function = "validate_oauth_provider_settings"))]
     pub github_oauth_settings: Option<OAuthProviderSettings>,
+    #[validate(custom(function = "validate_oauth_provider_settings"))]
+    pub apple_oauth_settings: Option<OAuthProviderSettings>,
 }
 
 // Response Types

@@ -61,6 +61,7 @@ use vsock::{VsockAddr, VsockStream};
 use web::attestation_routes;
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
+mod apple_signin;
 mod aws_credentials;
 mod billing;
 mod db;
@@ -76,13 +77,14 @@ mod private_key;
 mod sqs;
 mod web;
 
-use oauth::{GithubProvider, GoogleProvider, OAuthManager};
+use apple_signin::AppleJwtVerifier;
+use oauth::{AppleProvider, GithubProvider, GoogleProvider, OAuthManager};
 
 const ENCLAVE_KEY_NAME: &str = "enclave_key";
 const OPENAI_API_KEY_NAME: &str = "openai_api_key";
 const JWT_SECRET_KEY_NAME: &str = "jwt_secret";
 
-// TODO Use OpenSecret-specific values when migration is finished
+// General secret key names
 const GITHUB_CLIENT_ID_NAME: &str = "github_client_id";
 const GITHUB_CLIENT_SECRET_NAME: &str = "github_client_secret";
 const GOOGLE_CLIENT_ID_NAME: &str = "google_client_id";
@@ -367,6 +369,7 @@ pub struct AppState {
     oauth_manager: Arc<OAuthManager>,
     sqs_publisher: Option<Arc<SqsEventPublisher>>,
     billing_client: Option<BillingClient>,
+    apple_jwt_verifier: Arc<AppleJwtVerifier>,
 }
 
 #[derive(Default)]
@@ -383,6 +386,8 @@ pub struct AppStateBuilder {
     github_client_id: Option<String>,
     google_client_secret: Option<String>,
     google_client_id: Option<String>,
+    apple_client_secret: Option<String>,
+    apple_client_id: Option<String>,
     sqs_queue_maple_events_url: Option<String>,
     sqs_publisher: Option<Arc<SqsEventPublisher>>,
     billing_api_key: Option<String>,
@@ -450,6 +455,16 @@ impl AppStateBuilder {
 
     pub fn google_client_id(mut self, google_client_id: Option<String>) -> Self {
         self.google_client_id = google_client_id;
+        self
+    }
+
+    pub fn apple_client_secret(mut self, apple_client_secret: Option<String>) -> Self {
+        self.apple_client_secret = apple_client_secret;
+        self
+    }
+
+    pub fn apple_client_id(mut self, apple_client_id: Option<String>) -> Self {
+        self.apple_client_id = apple_client_id;
         self
     }
 
@@ -524,6 +539,13 @@ impl AppStateBuilder {
         })?;
         oauth_manager.add_provider("google".to_string(), Box::new(google_provider));
 
+        // Initialize Apple provider
+        let apple_provider = AppleProvider::new(db.clone()).await.map_err(|e| {
+            error!("Failed to initialize Apple OAuth provider: {:?}", e);
+            Error::BuilderError("Failed to initialize Apple OAuth provider".to_string())
+        })?;
+        oauth_manager.add_provider("apple".to_string(), Box::new(apple_provider));
+
         let oauth_manager = Arc::new(oauth_manager);
 
         // Initialize SQS publisher if URL is provided
@@ -553,6 +575,9 @@ impl AppStateBuilder {
             None
         };
 
+        // Initialize the AppleJwtVerifier
+        let apple_jwt_verifier = Arc::new(AppleJwtVerifier::new());
+
         Ok(AppState {
             app_mode,
             db,
@@ -567,6 +592,7 @@ impl AppStateBuilder {
             oauth_manager,
             sqs_publisher,
             billing_client,
+            apple_jwt_verifier,
         })
     }
 }

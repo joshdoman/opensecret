@@ -759,6 +759,11 @@ async fn update_oauth_settings(
         return Err(ApiError::BadRequest);
     }
 
+    if update_request.apple_oauth_enabled && update_request.apple_oauth_settings.is_none() {
+        error!("Apple OAuth settings must be provided when Apple OAuth is enabled");
+        return Err(ApiError::BadRequest);
+    }
+
     // Get org and project by UUID
     let org = data
         .db
@@ -791,8 +796,10 @@ async fn update_oauth_settings(
     let oauth_settings = OAuthSettings {
         google_oauth_enabled: update_request.google_oauth_enabled,
         github_oauth_enabled: update_request.github_oauth_enabled,
+        apple_oauth_enabled: update_request.apple_oauth_enabled,
         google_oauth_settings: update_request.google_oauth_settings,
         github_oauth_settings: update_request.github_oauth_settings,
+        apple_oauth_settings: update_request.apple_oauth_settings,
     };
 
     // Update settings
