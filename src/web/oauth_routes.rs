@@ -4,8 +4,7 @@ use crate::oauth::OAuthState;
 use crate::web::encryption_middleware::{decrypt_request, encrypt_response, EncryptedResponse};
 use crate::web::login_routes::handle_new_user_registration;
 use crate::web::platform::common::{
-    PROJECT_APPLE_CLIENT_ID, PROJECT_APPLE_OAUTH_SECRET, PROJECT_GITHUB_OAUTH_SECRET,
-    PROJECT_GOOGLE_OAUTH_SECRET,
+    PROJECT_APPLE_OAUTH_SECRET, PROJECT_GITHUB_OAUTH_SECRET, PROJECT_GOOGLE_OAUTH_SECRET,
 };
 use crate::GithubProvider;
 use crate::GoogleProvider;
@@ -125,12 +124,12 @@ pub struct OAuthCallbackResponse {
 
 #[derive(Deserialize, Clone)]
 pub struct AppleNativeSignInRequest {
-    pub identity_token: String,      // JWT from Apple
-    pub user_identifier: String,     // Apple's unique user ID (sub)
-    pub email: Option<String>,       // Email (only provided on first sign-in)
-    pub given_name: Option<String>,  // First name (only provided on first sign-in)
-    pub family_name: Option<String>, // Last name (only provided on first sign-in)
-    pub client_id: Uuid,             // Your app's client ID for the project
+    pub identity_token: String,          // JWT from Apple
+    pub user_identifier: Option<String>, // Apple's unique user ID (sub) - Optional since we can extract from token
+    pub email: Option<String>,           // Email (only provided on first sign-in)
+    pub given_name: Option<String>,      // First name (only provided on first sign-in)
+    pub family_name: Option<String>,     // Last name (only provided on first sign-in)
+    pub client_id: Uuid,                 // Your app's client ID for the project
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -466,27 +465,23 @@ pub async fn oauth_callback(
                 ApiError::InternalServerError
             })?;
 
-            // Get Apple client ID for validation
-            let client_id_secret = app_state
+            // Get project OAuth settings first
+            let oauth_settings = app_state
                 .db
-                .get_org_project_secret_by_key_name_and_project(
-                    PROJECT_APPLE_CLIENT_ID,
-                    project.id,
-                )?
+                .get_project_oauth_settings(project.id)?
                 .ok_or_else(|| {
-                    error!("Apple client ID not found for project");
+                    error!("OAuth settings not found for project");
                     ApiError::BadRequest
                 })?;
 
-            // Decrypt the client ID
-            let secret_key = SecretKey::from_slice(&app_state.enclave_key)
-                .map_err(|_| ApiError::EncryptionError)?;
-
-            let client_id = String::from_utf8(
-                decrypt_with_key(&secret_key, &client_id_secret.secret_enc)
-                    .map_err(|_| ApiError::EncryptionError)?,
-            )
-            .map_err(|_| ApiError::EncryptionError)?;
+            // Get Apple client ID from project OAuth settings
+            let client_id = oauth_settings
+                .apple_oauth_settings
+                .ok_or_else(|| {
+                    error!("Apple OAuth settings not configured");
+                    ApiError::BadRequest
+                })?
+                .client_id;
 
             // For Apple, we need to extract the ID token from the token exchange response
             debug!("Processing Apple OAuth token response to get ID token");
@@ -931,31 +926,29 @@ pub async fn handle_apple_native_signin(
         .get_org_project_by_client_id(request.client_id)
         .map_err(|_| ApiError::BadRequest)?;
 
-    // Get Apple client ID for this project (Bundle ID)
-    let apple_client_id = app_state
+    // Get project OAuth settings
+    let oauth_settings = app_state
         .db
-        .get_org_project_secret_by_key_name_and_project(PROJECT_APPLE_CLIENT_ID, project.id)?
+        .get_project_oauth_settings(project.id)?
         .ok_or_else(|| {
-            error!("Apple client ID not found for project");
+            error!("OAuth settings not found for project");
             ApiError::BadRequest
         })?;
 
-    // Decrypt the client ID
-    let secret_key = SecretKey::from_slice(&app_state.enclave_key).map_err(|_| {
-        error!("Failed to create secret key from enclave key");
-        ApiError::InternalServerError
+    // Verify Apple OAuth is enabled
+    if !oauth_settings.apple_oauth_enabled {
+        error!("Apple OAuth is not enabled for this project");
+        return Err(ApiError::BadRequest);
+    }
+
+    // Get Apple client ID from project settings
+    let apple_oauth_settings = oauth_settings.apple_oauth_settings.ok_or_else(|| {
+        error!("Apple OAuth settings not configured");
+        ApiError::BadRequest
     })?;
 
-    let client_id = String::from_utf8(
-        decrypt_with_key(&secret_key, &apple_client_id.secret_enc).map_err(|_| {
-            error!("Failed to decrypt Apple client ID");
-            ApiError::InternalServerError
-        })?,
-    )
-    .map_err(|_| {
-        error!("Failed to parse decrypted Apple client ID as UTF-8");
-        ApiError::InternalServerError
-    })?;
+    // Use the client ID from OAuth settings
+    let client_id = apple_oauth_settings.client_id;
 
     // Verify the Apple JWT token using the shared verifier
     debug!("Verifying Apple identity token");
@@ -966,11 +959,16 @@ pub async fn handle_apple_native_signin(
     )
     .await?;
 
-    // Verify the sub from the token matches the user_identifier
-    if claims.sub != request.user_identifier {
-        error!("User identifier mismatch in Apple token");
-        return Err(ApiError::BadRequest);
+    // If user_identifier is provided, verify it matches the sub from the token
+    if let Some(user_id) = &request.user_identifier {
+        if *user_id != claims.sub {
+            error!("User identifier mismatch in Apple token");
+            return Err(ApiError::BadRequest);
+        }
     }
+
+    // Use the sub claim from the token as the verified user identifier
+    let verified_user_id = claims.sub.clone();
 
     // Get the Apple provider from the database
     let apple_provider = app_state
@@ -998,11 +996,14 @@ pub async fn handle_apple_native_signin(
         .db
         .get_user_oauth_connection_by_provider_and_provider_user_id(
             apple_provider.id,
-            &claims.sub,
+            &verified_user_id,
         )?
     {
         // Found a connection - get the user
-        debug!("Found existing connection for Apple ID: {}", claims.sub);
+        debug!(
+            "Found existing connection for Apple ID: {}",
+            verified_user_id
+        );
 
         let user = app_state.db.get_user_by_uuid(connection.user_id)?;
 
@@ -1037,7 +1038,7 @@ pub async fn handle_apple_native_signin(
     // If we get here, user doesn't exist - need to create new user
     debug!(
         "No existing user found with Apple ID: {}, creating new user",
-        claims.sub
+        verified_user_id
     );
 
     // For new users, we absolutely need an email
@@ -1053,10 +1054,34 @@ pub async fn handle_apple_native_signin(
         })?;
 
     // Construct a name from given_name and family_name if provided
+    // and ensure it's None if empty or just whitespace
     let user_name = match (request.given_name.clone(), request.family_name.clone()) {
-        (Some(given), Some(family)) => Some(format!("{} {}", given, family)),
-        (Some(given), None) => Some(given),
-        (None, Some(family)) => Some(family),
+        (Some(given), Some(family)) => {
+            let combined = format!("{} {}", given.trim(), family.trim())
+                .trim()
+                .to_string();
+            if combined.is_empty() {
+                None
+            } else {
+                Some(combined)
+            }
+        }
+        (Some(given), None) => {
+            let trimmed = given.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        }
+        (None, Some(family)) => {
+            let trimmed = family.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        }
         (None, None) => None,
     };
 
@@ -1064,7 +1089,7 @@ pub async fn handle_apple_native_signin(
     let user = find_or_create_user_from_oauth(
         &app_state,
         email,
-        claims.sub,
+        verified_user_id,
         "apple",
         access_token,
         user_name,

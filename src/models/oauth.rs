@@ -137,7 +137,7 @@ impl UserOAuthConnection {
             .optional()
             .map_err(OAuthError::DatabaseError)
     }
-    
+
     pub fn get_by_provider_and_provider_user_id(
         conn: &mut PgConnection,
         lookup_provider_id: i32,

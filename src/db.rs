@@ -653,15 +653,19 @@ impl DBConnection for PostgresConnection {
         UserOAuthConnection::get_by_user_and_provider(conn, user_id, provider_id)
             .map_err(DBError::from)
     }
-    
+
     fn get_user_oauth_connection_by_provider_and_provider_user_id(
         &self,
         provider_id: i32,
         provider_user_id: &str,
     ) -> Result<Option<UserOAuthConnection>, DBError> {
         let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
-        UserOAuthConnection::get_by_provider_and_provider_user_id(conn, provider_id, provider_user_id)
-            .map_err(DBError::from)
+        UserOAuthConnection::get_by_provider_and_provider_user_id(
+            conn,
+            provider_id,
+            provider_user_id,
+        )
+        .map_err(DBError::from)
     }
 
     fn get_all_user_oauth_connections_for_user(
