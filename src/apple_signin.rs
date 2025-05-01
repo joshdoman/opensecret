@@ -1,11 +1,66 @@
 use crate::ApiError;
 use jsonwebtoken::{decode_header, Algorithm, DecodingKey, Validation};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
+
+// Custom deserializer for boolean values that might come as strings "true"/"false"
+fn bool_from_string<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // Try to deserialize as various types
+    struct BoolVisitor;
+
+    impl serde::de::Visitor<'_> for BoolVisitor {
+        type Value = Option<bool>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a boolean, string \"true\"/\"false\", or null")
+        }
+
+        // Handle actual boolean values
+        fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(value))
+        }
+
+        // Handle string values "true"/"false"
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            match value.to_lowercase().as_str() {
+                "true" => Ok(Some(true)),
+                "false" => Ok(Some(false)),
+                // Could add more variants like "1"/"0" if needed
+                _ => Err(E::custom(format!("Invalid boolean string: {}", value))),
+            }
+        }
+
+        // Handle null values
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_any(BoolVisitor)
+}
 
 const APPLE_JWKS_URL: &str = "https://appleid.apple.com/auth/keys";
 const APPLE_ISSUER: &str = "https://appleid.apple.com";
@@ -38,15 +93,17 @@ impl AppleKey {
 // Apple ID token claims
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AppleIdTokenClaims {
-    pub iss: String,                  // Issuer (should be https://appleid.apple.com)
-    pub sub: String,                  // Subject - The unique identifier for the user
-    pub aud: String,                  // Audience - should match your client_id
-    pub exp: i64,                     // Expiration time
-    pub iat: i64,                     // Issued at time
-    pub email: Option<String>,        // User's email (only on first sign-in)
+    pub iss: String,           // Issuer (should be https://appleid.apple.com)
+    pub sub: String,           // Subject - The unique identifier for the user
+    pub aud: String,           // Audience - should match your client_id
+    pub exp: i64,              // Expiration time
+    pub iat: i64,              // Issued at time
+    pub email: Option<String>, // User's email (only on first sign-in)
+    #[serde(deserialize_with = "bool_from_string")]
     pub email_verified: Option<bool>, // Whether email is verified
-    #[serde(rename = "is_private_email")]
+    #[serde(rename = "is_private_email", deserialize_with = "bool_from_string")]
     pub is_private_email: Option<bool>, // Whether it's a private relay email
+    pub nonce: Option<String>, // Nonce to prevent replay attacks
     pub nonce_supported: Option<bool>,
     pub real_user_status: Option<i32>, // Apple's assessment of whether this is a real person
     pub auth_time: Option<i64>,        // When the authentication occurred
@@ -74,6 +131,7 @@ impl AppleJwtVerifier {
         &self,
         token: &str,
         audience: &str,
+        expected_nonce: Option<&str>,
     ) -> Result<AppleIdTokenClaims, ApiError> {
         // Get the kid from the token header
         let header = decode_header(token).map_err(|e| {
@@ -111,6 +169,28 @@ impl AppleJwtVerifier {
                     ApiError::InvalidJwt
                 },
             )?;
+
+        // Verify nonce if expected_nonce is provided
+        if let Some(expected) = expected_nonce {
+            match &token_data.claims.nonce {
+                Some(token_nonce) => {
+                    // Apple stores SHA256 hash of the nonce in the token
+                    use sha2::{Digest, Sha256};
+                    let mut hasher = Sha256::new();
+                    hasher.update(expected.as_bytes());
+                    let hashed_nonce = hex::encode(hasher.finalize());
+
+                    if &hashed_nonce != token_nonce {
+                        error!("Nonce mismatch in Apple token");
+                        return Err(ApiError::InvalidJwt);
+                    }
+                }
+                None => {
+                    error!("Expected nonce but none found in token");
+                    return Err(ApiError::InvalidJwt);
+                }
+            }
+        }
 
         debug!("Apple JWT successfully verified");
         Ok(token_data.claims)
@@ -212,6 +292,9 @@ pub async fn validate_apple_native_token(
     verifier: &AppleJwtVerifier,
     identity_token: &str,
     client_id: &str,
+    nonce: Option<&str>,
 ) -> Result<AppleIdTokenClaims, ApiError> {
-    verifier.verify_token(identity_token, client_id).await
+    verifier
+        .verify_token(identity_token, client_id, nonce)
+        .await
 }

@@ -130,6 +130,7 @@ pub struct AppleNativeSignInRequest {
     pub given_name: Option<String>,      // First name (only provided on first sign-in)
     pub family_name: Option<String>,     // Last name (only provided on first sign-in)
     pub client_id: Uuid,                 // Your app's client ID for the project
+    pub nonce: Option<String>,           // Optional nonce for preventing replay attacks
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -551,8 +552,19 @@ pub async fn oauth_callback(
                 let user = app_state.db.get_user_by_uuid(connection.user_id)?;
 
                 // Update the connection with the new token
-                update_provider_connection(&app_state, &user, apple_db_provider.id, &access_token)
-                    .await?;
+                // For Apple web flow, use the refresh token if available, otherwise empty string
+                let token_to_store = token
+                    .refresh_token()
+                    .map(|rt| rt.secret().to_string())
+                    .unwrap_or_else(|| "".to_string());
+
+                update_provider_connection(
+                    &app_state,
+                    &user,
+                    apple_db_provider.id,
+                    &token_to_store,
+                )
+                .await?;
 
                 Some(user)
             } else {
@@ -582,12 +594,18 @@ pub async fn oauth_callback(
                         ApiError::NoEmailFound
                     })?;
 
+                // For Apple web flow, use the refresh token if available, otherwise empty string
+                let token_to_store = token
+                    .refresh_token()
+                    .map(|rt| rt.secret().to_string())
+                    .unwrap_or_else(|| "".to_string());
+
                 find_or_create_user_from_oauth(
                     &app_state,
                     email,
                     sub,
                     "apple",
-                    access_token,
+                    token_to_store, // Store refresh token instead of access token
                     apple_user.name.clone(),
                     project.id,
                 )
@@ -790,9 +808,10 @@ async fn fetch_apple_user(
 ) -> Result<AppleUser, ApiError> {
     debug!("Parsing and validating Apple ID token");
 
-    // Validate the token using the shared verifier
+    // Validate the token using the shared verifier (no nonce validation for now in web flow)
     let claims =
-        validate_apple_native_token(&app_state.apple_jwt_verifier, id_token, client_id).await?;
+        validate_apple_native_token(&app_state.apple_jwt_verifier, id_token, client_id, None)
+            .await?;
 
     // Create an AppleUser from the claims
     let apple_user = AppleUser {
@@ -950,12 +969,13 @@ pub async fn handle_apple_native_signin(
     // Use the client ID from OAuth settings
     let client_id = apple_oauth_settings.client_id;
 
-    // Verify the Apple JWT token using the shared verifier
+    // Verify the Apple JWT token using the shared verifier with nonce if provided
     debug!("Verifying Apple identity token");
     let claims = validate_apple_native_token(
         &app_state.apple_jwt_verifier,
         &request.identity_token,
         &client_id,
+        request.nonce.as_deref(),
     )
     .await?;
 
@@ -983,8 +1003,9 @@ pub async fn handle_apple_native_signin(
             ApiError::InternalServerError
         })?;
 
-    // Access token is the identity token itself (not ideal but works for now)
-    let access_token = request.identity_token.clone();
+    // For Apple native flow, we don't need to store any tokens
+    // The iOS device handles authentication and token management
+    let access_token = "".to_string(); // Empty string instead of storing the ID token
 
     // For Apple, we need a special approach:
     // 1. First, try to find any existing users with this Apple ID
@@ -1007,7 +1028,7 @@ pub async fn handle_apple_native_signin(
 
         let user = app_state.db.get_user_by_uuid(connection.user_id)?;
 
-        // Update the connection with the new token
+        // Update the connection with an empty string instead of storing the ID token
         update_provider_connection(&app_state, &user, apple_provider.id, &access_token).await?;
 
         // Generate JWT tokens
@@ -1126,10 +1147,8 @@ async fn update_provider_connection(
     app_state: &AppState,
     user: &User,
     provider_id: i32,
-    access_token: &str,
+    token: &str,
 ) -> Result<(), ApiError> {
-    let encrypted_access_token = encrypt_access_token(app_state, access_token).await?;
-
     let mut connection = app_state
         .db
         .get_user_oauth_connection_by_user_and_provider(user.uuid, provider_id)
@@ -1139,7 +1158,12 @@ async fn update_provider_connection(
         })?
         .expect("Connection should exist");
 
-    connection.access_token_enc = encrypted_access_token;
+    // Only encrypt and update token if it's not empty
+    if !token.is_empty() {
+        let encrypted_token = encrypt_access_token(app_state, token).await?;
+        connection.access_token_enc = encrypted_token;
+    }
+
     app_state
         .db
         .update_user_oauth_connection(&connection)
@@ -1158,15 +1182,20 @@ async fn create_provider_connection(
     provider_user_id: String,
     access_token: &str,
 ) -> Result<(), ApiError> {
-    let encrypted_access_token = encrypt_access_token(app_state, access_token).await?;
+    // Only encrypt/store the token if it's not empty
+    let encrypted_token = if !access_token.is_empty() {
+        Some(encrypt_access_token(app_state, access_token).await?)
+    } else {
+        None
+    };
 
     let new_connection = NewUserOAuthConnection {
         user_id: user.uuid,
         provider_id,
         provider_user_id,
-        access_token_enc: encrypted_access_token,
-        refresh_token_enc: None, // Assuming no refresh tokens for both providers
-        expires_at: None,        // Assuming tokens don't expire unless revoked
+        access_token_enc: encrypted_token.unwrap_or_default(),
+        refresh_token_enc: None,
+        expires_at: None,
     };
 
     app_state
