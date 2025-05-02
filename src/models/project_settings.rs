@@ -58,8 +58,12 @@ pub struct OAuthProviderSettings {
 pub struct OAuthSettings {
     pub google_oauth_enabled: bool,
     pub github_oauth_enabled: bool,
+    #[serde(default)]
+    pub apple_oauth_enabled: bool,
     pub google_oauth_settings: Option<OAuthProviderSettings>,
     pub github_oauth_settings: Option<OAuthProviderSettings>,
+    #[serde(default)]
+    pub apple_oauth_settings: Option<OAuthProviderSettings>,
 }
 
 #[derive(Queryable, Identifiable)]

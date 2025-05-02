@@ -39,6 +39,7 @@ pub enum LoginMethod {
     Email,
     Github,
     Google,
+    Apple,
     Guest,
 }
 
@@ -492,6 +493,7 @@ pub async fn user_protected(
                             app_user.login_method = match provider.name.as_str() {
                                 "github" => LoginMethod::Github,
                                 "google" => LoginMethod::Google,
+                                "apple" => LoginMethod::Apple,
                                 // Add other providers here as they're supported
                                 _ => {
                                     tracing::error!("Unknown OAuth provider: {}", provider.name);

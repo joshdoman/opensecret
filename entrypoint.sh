@@ -225,6 +225,10 @@ echo "127.0.0.11 oauth2.googleapis.com" >> /etc/hosts
 echo "127.0.0.12 www.googleapis.com" >> /etc/hosts
 log "Added Google OAuth domains to /etc/hosts"
 
+# Add Apple OAuth hostname to /etc/hosts
+echo "127.0.0.15 appleid.apple.com" >> /etc/hosts
+log "Added Apple OAuth domain to /etc/hosts"
+
 # Add AWS SQS hostname to /etc/hosts
 echo "127.0.0.13 sqs.us-east-2.amazonaws.com" >> /etc/hosts
 log "Added AWS SQS domain to /etc/hosts"
@@ -302,6 +306,10 @@ python3 /app/traffic_forwarder.py 127.0.0.13 443 3 8016 &
 # Start the traffic forwarder for billing service in the background
 log "Starting billing service traffic forwarder"
 python3 /app/traffic_forwarder.py 127.0.0.14 443 3 8017 &
+
+# Start the traffic forwarder for Apple OAuth in the background
+log "Starting Apple OAuth traffic forwarder"
+python3 /app/traffic_forwarder.py 127.0.0.15 443 3 8018 &
 
 # Wait for the forwarders to start
 log "Waiting for forwarders to start"
@@ -405,6 +413,14 @@ if timeout 5 bash -c '</dev/tcp/127.0.0.14/443'; then
     log "Billing service connection successful"
 else
     log "Billing service connection failed"
+fi
+
+# Test the connection to Apple OAuth
+log "Testing connection to Apple OAuth:"
+if timeout 5 bash -c '</dev/tcp/127.0.0.15/443'; then
+    log "Apple OAuth connection successful"
+else
+    log "Apple OAuth connection failed"
 fi
 
 # Start the continuum-proxy if we're in AWS Nitro mode

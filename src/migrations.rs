@@ -137,6 +137,7 @@ async fn perform_maple_settings_migration(
         let oauth_settings = OAuthSettings {
             google_oauth_enabled: google_client_id.is_some() && google_client_secret.is_some(),
             github_oauth_enabled: github_client_id.is_some() && github_client_secret.is_some(),
+            apple_oauth_enabled: false, // Apple auth is new, so disabled by default in migrations
             google_oauth_settings: google_client_id.map(|client_id| OAuthProviderSettings {
                 client_id,
                 redirect_url: format!("{}/auth/google/callback", oauth_base_url),
@@ -145,6 +146,7 @@ async fn perform_maple_settings_migration(
                 client_id,
                 redirect_url: format!("{}/auth/github/callback", oauth_base_url),
             }),
+            apple_oauth_settings: None, // No Apple OAuth settings during migration
         };
 
         app_state

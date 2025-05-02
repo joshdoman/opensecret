@@ -239,6 +239,119 @@ impl GoogleProvider {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AppleProvider {
+    pub auth_url: String,
+    pub token_url: String,
+    pub jwks_url: String,
+    pub state_store: Arc<RwLock<HashMap<String, OAuthState>>>,
+    // No need for user_info_url as Apple doesn't have a separate endpoint - all info is in the ID token
+}
+
+impl AppleProvider {
+    pub async fn new(db: Arc<dyn DBConnection + Send + Sync>) -> Result<Self, Error> {
+        let auth_url = "https://appleid.apple.com/auth/authorize".to_string();
+        let token_url = "https://appleid.apple.com/auth/token".to_string();
+        let jwks_url = "https://appleid.apple.com/auth/keys".to_string();
+
+        let provider = Self {
+            auth_url,
+            token_url,
+            jwks_url,
+            state_store: Arc::new(RwLock::new(HashMap::new())),
+        };
+
+        // Ensure the provider exists in the database
+        provider.ensure_provider_exists(db).await?;
+
+        info!("Apple OAuth provider initialized successfully");
+        Ok(provider)
+    }
+
+    pub async fn build_client(
+        &self,
+        client_id: String,
+        client_secret: String,
+        redirect_url: String,
+    ) -> Result<BasicClient, Error> {
+        let auth_url = AuthUrl::new(self.auth_url.clone())
+            .map_err(|e| Error::OAuthError(format!("Invalid auth URL: {}", e)))?;
+        let token_url = TokenUrl::new(self.token_url.clone())
+            .map_err(|e| Error::OAuthError(format!("Invalid token URL: {}", e)))?;
+
+        Ok(BasicClient::new(
+            ClientId::new(client_id),
+            Some(ClientSecret::new(client_secret)),
+            auth_url,
+            Some(token_url),
+        )
+        .set_redirect_uri(
+            RedirectUrl::new(redirect_url)
+                .map_err(|e| Error::OAuthError(format!("Invalid redirect URL: {}", e)))?,
+        ))
+    }
+
+    pub async fn generate_authorize_url(&self, client: &BasicClient) -> (String, CsrfToken) {
+        // For Apple Sign In, we'll primarily use the JS SDK on the frontend
+        // This URL is fallback for non-JS environments
+        let (auth_url, csrf_token) = client
+            .authorize_url(CsrfToken::new_random)
+            .add_scope(Scope::new("name".to_string()))
+            .add_scope(Scope::new("email".to_string()))
+            .add_extra_param("response_mode", "form_post") // Required by Apple
+            .url();
+
+        (auth_url.to_string(), csrf_token)
+    }
+
+    pub async fn store_state(&self, csrf_token: &str, state: OAuthState) {
+        self.state_store
+            .write()
+            .await
+            .insert(csrf_token.to_string(), state);
+    }
+
+    pub async fn validate_state(&self, state: &OAuthState) -> bool {
+        if let Some(stored_state) = self.state_store.read().await.get(&state.csrf_token) {
+            // Validate both the CSRF token and the client_id match
+            stored_state == state
+        } else {
+            false
+        }
+    }
+
+    async fn ensure_provider_exists(
+        &self,
+        db: Arc<dyn DBConnection + Send + Sync>,
+    ) -> Result<(), Error> {
+        debug!("Checking if Apple OAuth provider exists in the database");
+        let existing_provider = db.get_oauth_provider_by_name("apple")?;
+
+        if existing_provider.is_none() {
+            info!("Apple OAuth provider not found in database, creating new entry");
+            // Set a dummy user_info_url as Apple doesn't have one, everything comes from the JWT
+            let new_provider = NewOAuthProvider {
+                name: "apple".to_string(),
+                auth_url: self.auth_url.clone(),
+                token_url: self.token_url.clone(),
+                user_info_url: self.jwks_url.clone(), // Use JWKS URL in place of user_info_url
+            };
+
+            match db.create_oauth_provider(new_provider) {
+                Ok(_) => info!("Apple OAuth provider successfully added to database"),
+                Err(e) => {
+                    error!("Failed to create Apple OAuth provider in database: {:?}", e);
+                    return Err(e.into());
+                }
+            }
+        } else {
+            debug!("Apple OAuth provider already exists in database");
+        }
+
+        Ok(())
+    }
+}
+
 #[async_trait]
 pub trait OAuthProvider: Send + Sync + 'static {
     fn as_github(&self) -> Option<&GithubProvider> {
@@ -246,6 +359,10 @@ pub trait OAuthProvider: Send + Sync + 'static {
     }
 
     fn as_google(&self) -> Option<&GoogleProvider> {
+        None
+    }
+
+    fn as_apple(&self) -> Option<&AppleProvider> {
         None
     }
 
@@ -312,6 +429,35 @@ impl OAuthProvider for GithubProvider {
 #[async_trait]
 impl OAuthProvider for GoogleProvider {
     fn as_google(&self) -> Option<&GoogleProvider> {
+        Some(self)
+    }
+
+    async fn generate_authorize_url(&self, client: &BasicClient) -> (String, CsrfToken) {
+        self.generate_authorize_url(client).await
+    }
+
+    async fn store_state(&self, csrf_token: &str, state: OAuthState) {
+        self.store_state(csrf_token, state).await
+    }
+
+    async fn validate_state(&self, state: &OAuthState) -> bool {
+        self.validate_state(state).await
+    }
+
+    async fn build_client(
+        &self,
+        client_id: String,
+        client_secret: String,
+        redirect_url: String,
+    ) -> Result<BasicClient, Error> {
+        self.build_client(client_id, client_secret, redirect_url)
+            .await
+    }
+}
+
+#[async_trait]
+impl OAuthProvider for AppleProvider {
+    fn as_apple(&self) -> Option<&AppleProvider> {
         Some(self)
     }
 
