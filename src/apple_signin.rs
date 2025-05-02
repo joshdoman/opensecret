@@ -99,9 +99,13 @@ pub struct AppleIdTokenClaims {
     pub exp: i64,              // Expiration time
     pub iat: i64,              // Issued at time
     pub email: Option<String>, // User's email (only on first sign-in)
-    #[serde(deserialize_with = "bool_from_string")]
+    #[serde(deserialize_with = "bool_from_string", default)]
     pub email_verified: Option<bool>, // Whether email is verified
-    #[serde(rename = "is_private_email", deserialize_with = "bool_from_string")]
+    #[serde(
+        rename = "is_private_email",
+        deserialize_with = "bool_from_string",
+        default
+    )]
     pub is_private_email: Option<bool>, // Whether it's a private relay email
     pub nonce: Option<String>, // Nonce to prevent replay attacks
     pub nonce_supported: Option<bool>,
