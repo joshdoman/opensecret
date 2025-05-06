@@ -1,6 +1,21 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    account_deletion_requests (id) {
+        id -> Int4,
+        user_id -> Uuid,
+        project_id -> Int4,
+        #[max_length = 255]
+        hashed_secret -> Varchar,
+        encrypted_code -> Bytea,
+        expiration_time -> Timestamptz,
+        created_at -> Timestamptz,
+        completed_at -> Nullable<Timestamptz>,
+        is_deleted -> Bool,
+    }
+}
+
+diesel::table! {
     email_verifications (id) {
         id -> Int4,
         user_id -> Uuid,
@@ -222,6 +237,7 @@ diesel::joinable!(user_oauth_connections -> oauth_providers (provider_id));
 diesel::joinable!(users -> org_projects (project_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
+    account_deletion_requests,
     email_verifications,
     enclave_secrets,
     invite_codes,

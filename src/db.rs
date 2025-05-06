@@ -1,3 +1,6 @@
+use crate::models::account_deletion::{
+    AccountDeletionError, AccountDeletionRequest, NewAccountDeletionRequest,
+};
 use crate::models::enclave_secrets::{EnclaveSecret, EnclaveSecretError, NewEnclaveSecret};
 use crate::models::invite_codes::{InviteCode, InviteCodeError, NewInviteCode};
 use crate::models::oauth::{
@@ -60,6 +63,10 @@ pub enum DBError {
     PasswordResetError(#[from] PasswordResetError),
     #[error("Password reset request not found")]
     PasswordResetRequestNotFound,
+    #[error("Account deletion error: {0}")]
+    AccountDeletionError(#[from] AccountDeletionError),
+    #[error("Account deletion request not found")]
+    AccountDeletionRequestNotFound,
     #[error("Encryption error: {0}")]
     EncryptionError(#[from] crate::encrypt::EncryptError),
     #[error("OAuth error: {0}")]
@@ -154,6 +161,27 @@ pub trait DBConnection {
     fn mark_password_reset_as_complete(
         &self,
         request: &PasswordResetRequest,
+    ) -> Result<(), DBError>;
+
+    // Account Deletion methods
+    fn create_account_deletion_request(
+        &self,
+        new_request: NewAccountDeletionRequest,
+    ) -> Result<AccountDeletionRequest, DBError>;
+    fn get_account_deletion_request_by_user_id_and_code(
+        &self,
+        user_id: Uuid,
+        encrypted_code: Vec<u8>,
+    ) -> Result<Option<AccountDeletionRequest>, DBError>;
+    fn mark_account_deletion_as_complete(
+        &self,
+        request: &AccountDeletionRequest,
+    ) -> Result<(), DBError>;
+    fn delete_user(&self, user: &User) -> Result<(), DBError>;
+    fn mark_and_delete_user(
+        &self,
+        user: &User,
+        deletion_request: &AccountDeletionRequest,
     ) -> Result<(), DBError>;
 
     // OAuth Provider methods
@@ -1578,6 +1606,85 @@ impl DBConnection for PostgresConnection {
             error!("Failed to validate platform invite code: {:?}", e);
         }
         result
+    }
+
+    // Account Deletion implementations
+    fn create_account_deletion_request(
+        &self,
+        new_request: NewAccountDeletionRequest,
+    ) -> Result<AccountDeletionRequest, DBError> {
+        debug!("Creating new account deletion request");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = new_request.insert(conn).map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!("Failed to create account deletion request: {:?}", e);
+        }
+        result
+    }
+
+    fn get_account_deletion_request_by_user_id_and_code(
+        &self,
+        user_id: Uuid,
+        encrypted_code: Vec<u8>,
+    ) -> Result<Option<AccountDeletionRequest>, DBError> {
+        debug!("Getting account deletion request by user_id and encrypted code");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result =
+            AccountDeletionRequest::get_by_user_id_and_code(conn, user_id, &encrypted_code)
+                .map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!("Failed to get account deletion request: {:?}", e);
+        }
+        result
+    }
+
+    fn mark_account_deletion_as_complete(
+        &self,
+        request: &AccountDeletionRequest,
+    ) -> Result<(), DBError> {
+        debug!("Marking account deletion request as complete");
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+        let result = request.mark_as_deleted(conn).map_err(DBError::from);
+        if let Err(ref e) = result {
+            error!(
+                "Failed to mark account deletion request as complete: {:?}",
+                e
+            );
+        }
+        result
+    }
+
+    fn delete_user(&self, user: &User) -> Result<(), DBError> {
+        debug!("Deleting user with UUID: {}", user.uuid);
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+
+        // Use the User model's delete method
+        user.delete(conn).map_err(DBError::from)
+    }
+
+    fn mark_and_delete_user(
+        &self,
+        user: &User,
+        deletion_request: &AccountDeletionRequest,
+    ) -> Result<(), DBError> {
+        debug!(
+            "Deleting user and marking deletion request as complete for user: {}",
+            user.uuid
+        );
+        let conn = &mut self.db.get().map_err(|_| DBError::ConnectionError)?;
+
+        // Run both operations in a transaction to ensure atomicity
+        conn.transaction(|tx| {
+            // First mark the deletion request as complete
+            deletion_request
+                .mark_as_deleted(tx)
+                .map_err(DBError::from)?;
+
+            // Then delete the user
+            user.delete(tx).map_err(DBError::from)?;
+
+            Ok(())
+        })
     }
 }
 

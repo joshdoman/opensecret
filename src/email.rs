@@ -679,3 +679,130 @@ pub async fn send_platform_password_reset_confirmation_email(
     tracing::debug!("Exiting send_platform_password_reset_confirmation_email");
     Ok(())
 }
+
+pub async fn send_account_deletion_email(
+    app_state: &crate::AppState,
+    project_id: i32,
+    to_email: String,
+    confirmation_code: String,
+) -> Result<(), EmailError> {
+    tracing::debug!("Entering send_account_deletion_email");
+
+    let (api_key, from_email) = get_project_email_settings(app_state, project_id).await?;
+    let resend = Resend::new(&api_key);
+
+    // Get project name
+    let project = app_state
+        .db
+        .get_org_project_by_id(project_id)
+        .map_err(|e| {
+            error!("Failed to get project: {}", e);
+            EmailError::UnknownError
+        })?;
+
+    let to = [to_email];
+    let subject = format!("Account Deletion Request for Your {} Account", project.name);
+
+    let html_content = format!(
+        r#"
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Account Deletion Request</title>
+            <style>
+                body {{ font-family: ui-sans-serif,system-ui,sans-serif; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                h1, h2, h3 {{ font-weight: 300; }}
+                .code {{ background-color: rgba(1,1,1,0.05); padding: 10px; border-radius: 5px; font-family: monospace; font-size: 16px; }}
+                .warning {{ color: #e74c3c; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Account Deletion Request</h1>
+                <p>We received a request to delete your {} account. <span class="warning">This action is permanent and cannot be undone.</span></p>
+                <p>To confirm your account deletion, use the following confirmation code:</p>
+                <p class="code">{}</p>
+                <p>This confirmation code will expire in 24 hours.</p>
+                <p>If you did not request this account deletion, please ignore this email, and your account will remain active. If you have any concerns about account security, please contact our support team.</p>
+                <p>Best regards,<br>The OpenSecret Team</p>
+            </div>
+        </body>
+        </html>
+        "#,
+        project.name, confirmation_code
+    );
+
+    let email = CreateEmailBaseOptions::new(from_email, to, subject).with_html(&html_content);
+
+    let _email = resend.emails.send(email).await.map_err(|e| {
+        tracing::error!("Failed to send email: {}", e);
+        EmailError::UnknownError
+    });
+
+    tracing::debug!("Exiting send_account_deletion_email");
+    Ok(())
+}
+
+pub async fn send_account_deletion_confirmation_email(
+    app_state: &crate::AppState,
+    project_id: i32,
+    to_email: String,
+) -> Result<(), EmailError> {
+    tracing::debug!("Entering send_account_deletion_confirmation_email");
+
+    let (api_key, from_email) = get_project_email_settings(app_state, project_id).await?;
+    let resend = Resend::new(&api_key);
+
+    // Get project name
+    let project = app_state
+        .db
+        .get_org_project_by_id(project_id)
+        .map_err(|e| {
+            error!("Failed to get project: {}", e);
+            EmailError::UnknownError
+        })?;
+
+    let to = [to_email];
+    let subject = format!("Your {} Account Has Been Deleted", project.name);
+
+    let html_content = format!(
+        r#"
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Account Deletion Confirmation</title>
+            <style>
+                body {{ font-family: ui-sans-serif,system-ui,sans-serif; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                h1, h2, h3 {{ font-weight: 300; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Account Deletion Confirmation</h1>
+                <p>Your {} account has been successfully deleted along with all associated data.</p>
+                <p>If you did not request this account deletion, please contact us immediately at <a href="mailto:support@opensecret.cloud">support@opensecret.cloud</a>.</p>
+                <p>Thank you for your time with us. We hope to see you again in the future.</p>
+                <p>Best regards,<br>The OpenSecret Team</p>
+            </div>
+        </body>
+        </html>
+        "#,
+        project.name
+    );
+
+    let email = CreateEmailBaseOptions::new(from_email, to, subject).with_html(&html_content);
+
+    let _email = resend.emails.send(email).await.map_err(|e| {
+        tracing::error!("Failed to send email: {}", e);
+        EmailError::UnknownError
+    });
+
+    tracing::debug!("Exiting send_account_deletion_confirmation_email");
+    Ok(())
+}
