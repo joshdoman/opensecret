@@ -1,3 +1,4 @@
+pub mod account_deletion;
 pub mod email_verification;
 pub mod enclave_secrets;
 pub mod invite_codes;

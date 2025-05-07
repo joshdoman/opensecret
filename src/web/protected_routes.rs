@@ -30,7 +30,7 @@ use serde_json::json;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::spawn;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +84,17 @@ pub struct ProtectedUserData {
 pub struct ChangePasswordRequest {
     pub current_password: String,
     pub new_password: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InitiateAccountDeletionRequest {
+    pub hashed_secret: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConfirmAccountDeletionRequest {
+    pub confirmation_code: String,
+    pub plaintext_secret: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -403,6 +414,20 @@ pub fn router(app_state: Arc<AppState>) -> Router<()> {
             post(change_password).layer(from_fn_with_state(
                 app_state.clone(),
                 decrypt_request::<ChangePasswordRequest>,
+            )),
+        )
+        .route(
+            "/protected/delete-account/request",
+            post(initiate_account_deletion).layer(from_fn_with_state(
+                app_state.clone(),
+                decrypt_request::<InitiateAccountDeletionRequest>,
+            )),
+        )
+        .route(
+            "/protected/delete-account/confirm",
+            post(confirm_account_deletion).layer(from_fn_with_state(
+                app_state.clone(),
+                decrypt_request::<ConfirmAccountDeletionRequest>,
             )),
         )
         .route(
@@ -1264,6 +1289,90 @@ pub async fn decrypt_data(
 
     debug!("Exiting decrypt_data function, preparing encrypted response");
     encrypt_response(&data, &session_id, &decrypted_string).await
+}
+
+pub async fn initiate_account_deletion(
+    State(data): State<Arc<AppState>>,
+    Extension(user): Extension<User>,
+    Extension(delete_request): Extension<InitiateAccountDeletionRequest>,
+    Extension(session_id): Extension<Uuid>,
+) -> Result<Json<EncryptedResponse<serde_json::Value>>, ApiError> {
+    debug!("Entering initiate_account_deletion function");
+    info!("User {} is initiating account deletion request", user.uuid);
+
+    // Create the account deletion request
+    match data
+        .create_account_deletion_request(
+            user.uuid,
+            delete_request.hashed_secret.clone(),
+            user.project_id,
+        )
+        .await
+    {
+        Ok(_) => {
+            // Success - we return a generic message regardless of whether the
+            // request was actually created and email sent
+            let response = json!({
+                "message": "We have sent a confirmation code to your email."
+            });
+
+            let result = encrypt_response(&data, &session_id, &response).await;
+            debug!("Exiting initiate_account_deletion function");
+            result
+        }
+        Err(e) => {
+            error!("Error in initiating account deletion: {:?}", e);
+            Err(ApiError::InternalServerError)
+        }
+    }
+}
+
+pub async fn confirm_account_deletion(
+    State(data): State<Arc<AppState>>,
+    Extension(user): Extension<User>,
+    Extension(confirm_request): Extension<ConfirmAccountDeletionRequest>,
+    Extension(session_id): Extension<Uuid>,
+) -> Result<Json<EncryptedResponse<serde_json::Value>>, ApiError> {
+    debug!("Entering confirm_account_deletion function");
+    info!("User {} is confirming account deletion", user.uuid);
+
+    // Confirm the account deletion
+    match data
+        .confirm_account_deletion(
+            user.uuid,
+            confirm_request.confirmation_code.clone(),
+            confirm_request.plaintext_secret.clone(),
+        )
+        .await
+    {
+        Ok(_) => {
+            let response = json!({
+                "message": "Your account has been successfully deleted."
+            });
+
+            let result = encrypt_response(&data, &session_id, &response).await;
+            debug!("Exiting confirm_account_deletion function");
+            result
+        }
+        Err(e) => match e {
+            Error::AccountDeletionExpired => {
+                warn!("Account deletion confirmation has expired: {:?}", e);
+                Err(ApiError::BadRequest)
+            }
+            Error::InvalidAccountDeletionSecret => {
+                warn!("Invalid account deletion secret: {:?}", e);
+                Err(ApiError::BadRequest)
+            }
+            Error::InvalidAccountDeletionRequest => {
+                warn!("Invalid account deletion request: {:?}", e);
+                Err(ApiError::BadRequest)
+            }
+            _ => {
+                error!("Error in confirming account deletion: {:?}", e);
+                Err(ApiError::InternalServerError)
+            }
+        },
+    }
 }
 
 #[cfg(test)]

@@ -148,6 +148,14 @@ impl User {
             .map(|_| ())
             .map_err(UserError::DatabaseError)
     }
+
+    pub fn delete(&self, conn: &mut PgConnection) -> Result<(), UserError> {
+        diesel::delete(users::table)
+            .filter(users::uuid.eq(self.uuid))
+            .execute(conn)
+            .map(|_| ())
+            .map_err(UserError::DatabaseError)
+    }
 }
 
 // Here we've implemented `Debug` manually to avoid accidentally logging the

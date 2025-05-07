@@ -1,4 +1,5 @@
 use crate::email::{
+    send_account_deletion_confirmation_email, send_account_deletion_email,
     send_password_reset_confirmation_email, send_password_reset_email,
     send_platform_password_reset_confirmation_email, send_platform_password_reset_email,
 };
@@ -9,6 +10,7 @@ use crate::encrypt::{
 };
 use crate::jwt::validate_platform_jwt;
 use crate::login_routes::RegisterCredentials;
+use crate::models::account_deletion::{AccountDeletionError, NewAccountDeletionRequest};
 use crate::models::password_reset::NewPasswordResetRequest;
 use crate::models::platform_password_reset::NewPlatformPasswordResetRequest;
 use crate::models::platform_users::PlatformUser;
@@ -161,6 +163,15 @@ pub enum Error {
 
     #[error("Invalid password reset request")]
     InvalidPasswordResetRequest,
+
+    #[error("Account deletion request expired")]
+    AccountDeletionExpired,
+
+    #[error("Invalid account deletion secret")]
+    InvalidAccountDeletionSecret,
+
+    #[error("Invalid account deletion request")]
+    InvalidAccountDeletionRequest,
 
     #[error("Password verification error: {0}")]
     PasswordVerificationError(#[from] VerifyError),
@@ -1339,6 +1350,148 @@ impl AppState {
         Ok(base_url
             .join(&format!("/auth/{}/callback", provider))?
             .to_string())
+    }
+
+    pub async fn create_account_deletion_request(
+        &self,
+        user_id: Uuid,
+        hashed_secret: String,
+        project_id: i32,
+    ) -> Result<(), Error> {
+        // Generate a random UUID for the confirmation code
+        let confirmation_code = Uuid::new_v4();
+
+        // Check if the user exists
+        match self.db.get_user_by_uuid(user_id) {
+            Ok(user) => {
+                // Only proceed if user belongs to the project
+                if user.project_id != project_id {
+                    return Err(Error::UserNotFound);
+                }
+
+                // User exists, proceed with the actual deletion request
+                let secret_key = SecretKey::from_slice(&self.enclave_key)
+                    .map_err(|e| Error::EncryptionError(e.to_string()))?;
+                let encrypted_code =
+                    encrypt_key_deterministic(&secret_key, confirmation_code.as_bytes());
+
+                let new_request = NewAccountDeletionRequest::new(
+                    user.uuid,
+                    project_id,
+                    hashed_secret,
+                    encrypted_code,
+                    24, // 24 hours expiration
+                );
+
+                self.db.create_account_deletion_request(new_request)?;
+
+                // Send the account deletion email in the background
+                let app_state = self.clone();
+                let user_email = user.email.clone();
+                let code = confirmation_code.to_string();
+                tokio::spawn(async move {
+                    if let Some(email) = user_email {
+                        if let Err(e) =
+                            send_account_deletion_email(&app_state, project_id, email, code).await
+                        {
+                            error!("Failed to send account deletion email: {:?}", e);
+                        }
+                    }
+                });
+            }
+            Err(DBError::UserNotFound) => {
+                // User doesn't exist, but we don't want to reveal this information
+                // So we'll just log it and return as if everything was successful
+                debug!(
+                    "Account deletion requested for non-existent user: {}",
+                    user_id
+                );
+            }
+            Err(e) => {
+                // For other errors, we should still log them but not expose them to the user
+                error!("Error during account deletion request: {:?}", e);
+            }
+        }
+
+        // Return Ok regardless of whether we actually created a request
+        // The confirmation code is only delivered via email
+        Ok(())
+    }
+
+    pub async fn confirm_account_deletion(
+        &self,
+        user_id: Uuid,
+        confirmation_code: String,
+        plaintext_secret: String,
+    ) -> Result<(), Error> {
+        let user = self.db.get_user_by_uuid(user_id)?;
+
+        // Parse the confirmation code UUID from string
+        let confirmation_code_uuid = match Uuid::parse_str(&confirmation_code) {
+            Ok(uuid) => uuid,
+            Err(_) => return Err(Error::InvalidAccountDeletionRequest),
+        };
+
+        // Deterministically encrypt the provided confirmation code for lookup
+        let secret_key = SecretKey::from_slice(&self.enclave_key)
+            .map_err(|e| Error::EncryptionError(e.to_string()))?;
+        let encrypted_code =
+            encrypt_key_deterministic(&secret_key, confirmation_code_uuid.as_bytes());
+
+        let deletion_request = self
+            .db
+            .get_account_deletion_request_by_user_id_and_code(user.uuid, encrypted_code)?;
+
+        if let Some(deletion_request) = deletion_request {
+            // Since we're filtering by expiration_time at the database level,
+            // this check serves as an additional validation and converts
+            // the model-specific error to an application-level error
+            if let Err(AccountDeletionError::RequestExpired) = deletion_request.is_expired() {
+                warn!("Account deletion request expired for user: {}", user.uuid);
+                return Err(Error::AccountDeletionExpired);
+            }
+
+            // Hash the plaintext secret again for comparison
+            let hashed_plaintext = generate_reset_hash(plaintext_secret.clone());
+
+            // Compare the hashed values using constant-time comparison
+            if hashed_plaintext
+                .as_bytes()
+                .ct_eq(deletion_request.hashed_secret.as_bytes())
+                .into()
+            {
+                // Secret verification succeeded, proceed with account deletion
+                // Use the transaction-based method for atomicity
+                self.db.mark_and_delete_user(&user, &deletion_request)?;
+
+                // Send confirmation email in the background if the user has an email
+                if let Some(email) = user.email.clone() {
+                    let app_state = self.clone();
+                    let project_id = user.project_id;
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            send_account_deletion_confirmation_email(&app_state, project_id, email)
+                                .await
+                        {
+                            error!(
+                                "Failed to send account deletion confirmation email: {:?}",
+                                e
+                            );
+                        }
+                    });
+                }
+
+                Ok(())
+            } else {
+                warn!(
+                    "Secret verification failed for user {}. Hashes do not match.",
+                    user.uuid
+                );
+                Err(Error::InvalidAccountDeletionSecret)
+            }
+        } else {
+            Err(Error::InvalidAccountDeletionRequest)
+        }
     }
 
     async fn authenticate_platform_user(
