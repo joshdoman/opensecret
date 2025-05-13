@@ -31,6 +31,7 @@ manifests/
 
 # AI Prompts
 .prompts/
+.claude/
 
 # PCR signing keys (files only, no directories needed)
 **/pcr_*.pem
