@@ -476,13 +476,20 @@ pub async fn oauth_callback(
                 })?;
 
             // Get Apple client ID from project OAuth settings
-            let client_id = oauth_settings
+            let mut client_id = oauth_settings
                 .apple_oauth_settings
                 .ok_or_else(|| {
                     error!("Apple OAuth settings not configured");
                     ApiError::BadRequest
                 })?
                 .client_id;
+
+            // For web-based OAuth flow, append .services to the client ID
+            // This is because Apple requires Services ID for web flow, not App ID
+            if !client_id.ends_with(".services") {
+                client_id = format!("{}.services", client_id);
+                debug!("Modified Apple client ID for web flow: {}", client_id);
+            }
 
             // For Apple, we need to extract the ID token from the token exchange response
             debug!("Processing Apple OAuth token response to get ID token");
