@@ -1,5 +1,8 @@
 use crate::{
-    models::{org_memberships::OrgRole, project_settings::OAuthProviderSettings},
+    models::{
+        org_memberships::OrgRole,
+        project_settings::{AppleOAuthSettings, OAuthProviderSettings},
+    },
     web::platform::validation::{
         validate_alphanumeric_only, validate_alphanumeric_with_symbols, validate_secret_size,
     },
@@ -91,8 +94,8 @@ pub struct UpdateOAuthSettingsRequest {
     pub google_oauth_settings: Option<OAuthProviderSettings>,
     #[validate(custom(function = "validate_oauth_provider_settings"))]
     pub github_oauth_settings: Option<OAuthProviderSettings>,
-    #[validate(custom(function = "validate_oauth_provider_settings"))]
-    pub apple_oauth_settings: Option<OAuthProviderSettings>,
+    #[validate(custom(function = "validate_apple_oauth_settings"))]
+    pub apple_oauth_settings: Option<AppleOAuthSettings>,
 }
 
 // Response Types
@@ -207,5 +210,61 @@ pub fn validate_oauth_provider_settings(
         error.message = Some(format!("Invalid redirect URL: {}", parse_err).into());
         return Err(error);
     }
+
+    Ok(())
+}
+
+pub fn validate_apple_oauth_settings(
+    settings: &AppleOAuthSettings,
+) -> Result<(), validator::ValidationError> {
+    // Validate client_id
+    if settings.client_id.is_empty() || settings.client_id.len() > 255 {
+        let mut error = validator::ValidationError::new("oauth_client_id");
+        error.message = Some(format!("Client ID must not be empty and must not exceed 255 characters (current length: {})", settings.client_id.len()).into());
+        return Err(error);
+    }
+    // Validate redirect_url
+    if settings.redirect_url.is_empty() || settings.redirect_url.len() > 255 {
+        let mut error = validator::ValidationError::new("oauth_redirect_url");
+        error.message = Some(format!("Redirect URL must not be empty and must not exceed 255 characters (current length: {})", settings.redirect_url.len()).into());
+        return Err(error);
+    }
+    // Basic URL validation
+    if let Err(parse_err) = url::Url::parse(&settings.redirect_url) {
+        let mut error = validator::ValidationError::new("oauth_redirect_url_invalid");
+        error.message = Some(format!("Invalid redirect URL: {}", parse_err).into());
+        return Err(error);
+    }
+
+    // Validate team_id if provided
+    if let Some(ref team_id) = settings.team_id {
+        if team_id.len() != 10 {
+            let mut error = validator::ValidationError::new("oauth_team_id_length");
+            error.message = Some(
+                format!(
+                    "Apple Team ID should be exactly 10 characters long (current length: {})",
+                    team_id.len()
+                )
+                .into(),
+            );
+            return Err(error);
+        }
+    }
+
+    // Validate key_id if provided
+    if let Some(ref key_id) = settings.key_id {
+        if key_id.len() != 10 {
+            let mut error = validator::ValidationError::new("oauth_key_id_length");
+            error.message = Some(
+                format!(
+                    "Apple Key ID should be exactly 10 characters long (current length: {})",
+                    key_id.len()
+                )
+                .into(),
+            );
+            return Err(error);
+        }
+    }
+
     Ok(())
 }

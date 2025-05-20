@@ -298,6 +298,7 @@ impl AppleProvider {
             .authorize_url(CsrfToken::new_random)
             .add_scope(Scope::new("name".to_string()))
             .add_scope(Scope::new("email".to_string()))
+            .add_extra_param("response_type", "code id_token") // Apple best practice
             .add_extra_param("response_mode", "form_post") // Required by Apple
             .url();
 

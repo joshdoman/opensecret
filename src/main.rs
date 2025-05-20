@@ -18,6 +18,7 @@ use crate::sqs::SqsEventPublisher;
 use crate::web::platform_login_routes;
 use crate::web::{health_routes, login_routes, oauth_routes, openai_routes, protected_routes};
 use crate::{attestation_routes::SessionState, web::platform_routes};
+
 use crate::{
     aws_credentials::AwsCredentialError,
     models::enclave_secrets::NewEnclaveSecret,

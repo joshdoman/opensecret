@@ -55,6 +55,14 @@ pub struct OAuthProviderSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AppleOAuthSettings {
+    pub client_id: String,
+    pub redirect_url: String,
+    pub team_id: Option<String>, // Apple Developer Team ID (10 chars)
+    pub key_id: Option<String>,  // Apple Private Key ID (10 chars)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OAuthSettings {
     pub google_oauth_enabled: bool,
     pub github_oauth_enabled: bool,
@@ -63,7 +71,7 @@ pub struct OAuthSettings {
     pub google_oauth_settings: Option<OAuthProviderSettings>,
     pub github_oauth_settings: Option<OAuthProviderSettings>,
     #[serde(default)]
-    pub apple_oauth_settings: Option<OAuthProviderSettings>,
+    pub apple_oauth_settings: Option<AppleOAuthSettings>,
 }
 
 #[derive(Queryable, Identifiable)]
