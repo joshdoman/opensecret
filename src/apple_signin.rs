@@ -1,5 +1,8 @@
 use crate::ApiError;
-use jsonwebtoken::{decode_header, Algorithm, DecodingKey, Validation};
+use chrono::Utc;
+use jsonwebtoken::{
+    decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
+};
 use reqwest::Client;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
@@ -301,4 +304,78 @@ pub async fn validate_apple_native_token(
     verifier
         .verify_token(identity_token, client_id, nonce)
         .await
+}
+
+// Apple client secret JWT claims structure
+#[derive(Serialize)]
+pub struct AppleClientSecretClaims {
+    iss: String, // Team ID
+    iat: i64,    // Issued at timestamp
+    exp: i64,    // Expiration timestamp
+    aud: String, // Audience (always "https://appleid.apple.com")
+    sub: String, // Client ID (your Services ID)
+}
+
+/// Generates an Apple client secret JWT
+///
+/// This function creates and signs a JWT that Apple requires for the token
+/// exchange step of OAuth2. Apple doesn't use a static client secret like
+/// other providers; instead, it requires a JWT signed with your private key.
+///
+/// * `team_id` - Your Apple Developer Team ID (10-character string)
+/// * `key_id` - The Key ID for your private key from Apple Developer portal (10-character string)
+/// * `private_key_pem` - The .p8 private key content (PEM format)
+/// * `client_id` - Your Apple Services ID (for web flows) or App ID (for native flows)
+///
+/// Returns a signed JWT string or an error
+pub fn generate_apple_client_secret(
+    team_id: &str,
+    key_id: &str,
+    private_key_pem: &str,
+    client_id: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    debug!("Generating Apple client secret JWT");
+
+    // Create JWT header with ES256 algorithm and Key ID
+    let mut header = Header::new(Algorithm::ES256);
+    header.kid = Some(key_id.to_owned());
+
+    // Current timestamp for iat claim
+    let now = Utc::now().timestamp();
+
+    // Create claims - exp must be less than 6 months (15,777,000 seconds) in the future
+    // Using 5 months (150 days) to be safe
+    let exp_time = now + 60 * 60 * 24 * 150; // 150 days in seconds
+
+    let claims = AppleClientSecretClaims {
+        iss: team_id.to_owned(),
+        iat: now,
+        exp: exp_time,
+        aud: "https://appleid.apple.com".to_owned(),
+        sub: client_id.to_owned(),
+    };
+
+    // Check if the private key looks like a PEM format
+    let has_begin = private_key_pem.contains("-----BEGIN");
+    let has_end = private_key_pem.contains("-----END");
+
+    if !has_begin || !has_end {
+        error!("Private key doesn't appear to be in PEM format");
+        return Err("Invalid private key format - not a valid PEM".into());
+    }
+
+    // Create ES256 encoding key from the PEM-formatted private key
+    let key = EncodingKey::from_ec_pem(private_key_pem.as_bytes()).map_err(|e| {
+        error!("Failed to create encoding key from PEM");
+        Box::new(e) as Box<dyn std::error::Error>
+    })?;
+
+    // Sign JWT with the private key
+    let token = encode(&header, &claims, &key).map_err(|e| {
+        error!("Failed to encode JWT");
+        Box::new(e) as Box<dyn std::error::Error>
+    })?;
+
+    debug!("Generated Apple client secret JWT successfully");
+    Ok(token)
 }
