@@ -13,7 +13,7 @@ use axum::{
 };
 use base64::{engine::general_purpose, Engine as _};
 use bigdecimal::BigDecimal;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures::stream::{self, Stream, StreamExt};
 use futures::TryStreamExt;
 use hyper::body::to_bytes;
@@ -23,10 +23,45 @@ use hyper_tls::HttpsConnector;
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
+
+// Cache for models response with 5-minute TTL
+struct ModelsCache {
+    data: Option<Value>,
+    expires_at: DateTime<Utc>,
+}
+
+impl ModelsCache {
+    fn new() -> Self {
+        Self {
+            data: None,
+            expires_at: Utc::now(),
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        self.data.is_some() && Utc::now() < self.expires_at
+    }
+
+    fn set(&mut self, data: Value) {
+        self.data = Some(data);
+        self.expires_at = Utc::now() + chrono::Duration::minutes(5);
+    }
+
+    fn get(&self) -> Option<&Value> {
+        if self.is_valid() {
+            self.data.as_ref()
+        } else {
+            None
+        }
+    }
+}
+
+// Global cache for models - shared across all requests
+static MODELS_CACHE: std::sync::OnceLock<RwLock<ModelsCache>> = std::sync::OnceLock::new();
 
 pub fn router(app_state: Arc<AppState>) -> Router<()> {
     Router::new()
@@ -341,6 +376,25 @@ async fn proxy_models(
         return Err(ApiError::Unauthorized);
     }
 
+    // Initialize the cache if needed
+    let cache = MODELS_CACHE.get_or_init(|| RwLock::new(ModelsCache::new()));
+
+    // Try to get cached response, but continue if it fails
+    let cached_response = match cache.read() {
+        Ok(cache_read) => cache_read.get().cloned(),
+        Err(e) => {
+            warn!("Failed to acquire read lock for models cache: {:?}", e);
+            None
+        }
+    };
+
+    if let Some(cached_data) = cached_response {
+        debug!("Returning cached models response");
+        return encrypt_response(&state, &session_id, &cached_data).await;
+    }
+
+    debug!("Cache miss or error, fetching models from API");
+
     // Use the OpenAI API key and base URL from AppState
     let openai_api_key = match &state.openai_api_key {
         Some(key) if !key.is_empty() => key,
@@ -425,6 +479,17 @@ async fn proxy_models(
         error!("Failed to parse models response: {:?}", e);
         ApiError::InternalServerError
     })?;
+
+    // Try to update the cache, but don't fail if it doesn't work
+    match cache.write() {
+        Ok(mut cache_write) => {
+            cache_write.set(models_response.clone());
+            debug!("Updated models cache with fresh data");
+        }
+        Err(e) => {
+            warn!("Failed to acquire write lock for cache: {:?}", e);
+        }
+    }
 
     debug!("Exiting proxy_models function");
     // Encrypt and return the response
