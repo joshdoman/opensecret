@@ -2,14 +2,14 @@ use crate::is_default_openai_domain;
 use crate::models::token_usage::NewTokenUsage;
 use crate::models::users::User;
 use crate::sqs::UsageEvent;
-use crate::web::encryption_middleware::decrypt_request;
+use crate::web::encryption_middleware::{decrypt_request, encrypt_response, EncryptedResponse};
 use crate::{ApiError, AppState};
 use axum::http::{header, HeaderMap};
 use axum::{
     extract::State,
     response::sse::{Event, Sse},
-    routing::post,
-    Router,
+    routing::{get, post},
+    Json, Router,
 };
 use base64::{engine::general_purpose, Engine as _};
 use bigdecimal::BigDecimal;
@@ -31,6 +31,7 @@ use uuid::Uuid;
 pub fn router(app_state: Arc<AppState>) -> Router<()> {
     Router::new()
         .route("/v1/chat/completions", post(proxy_openai))
+        .route("/v1/models", get(proxy_models))
         .layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             decrypt_request::<Value>,
@@ -321,4 +322,111 @@ async fn encrypt_and_process_event(
 
 fn process_event(data: &str) -> Event {
     Event::default().data(data)
+}
+
+async fn proxy_models(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::Extension(session_id): axum::Extension<Uuid>,
+    axum::Extension(user): axum::Extension<User>,
+) -> Result<Json<EncryptedResponse<Value>>, ApiError> {
+    debug!("Entering proxy_models function");
+
+    // Prevent guest users from using the models endpoint
+    if user.is_guest() {
+        error!(
+            "Guest user attempted to access models endpoint: {}",
+            user.uuid
+        );
+        return Err(ApiError::Unauthorized);
+    }
+
+    // Use the OpenAI API key and base URL from AppState
+    let openai_api_key = match &state.openai_api_key {
+        Some(key) if !key.is_empty() => key,
+        _ => {
+            if is_default_openai_domain(&state.openai_api_base) {
+                error!("OpenAI API key is required for OpenAI domain");
+                return Err(ApiError::InternalServerError);
+            }
+            "" // Empty string if not using OpenAI's domain
+        }
+    };
+    let openai_api_base = &state.openai_api_base;
+
+    // Create a new hyper client
+    let https = HttpsConnector::new();
+    let client = Client::builder()
+        .pool_idle_timeout(Duration::from_secs(15))
+        .build::<_, Body>(https);
+
+    // Prepare the request to OpenAI
+    let mut req = Request::builder()
+        .method("GET")
+        .uri(format!("{}/v1/models", openai_api_base));
+
+    if !openai_api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", openai_api_key));
+    }
+
+    // Forward relevant headers from the original request
+    for (key, value) in headers.iter() {
+        if key != header::HOST && key != header::AUTHORIZATION && key != header::CONTENT_LENGTH {
+            if let (Ok(name), Ok(val)) = (
+                HeaderName::from_bytes(key.as_ref()),
+                HeaderValue::from_str(value.to_str().unwrap_or_default()),
+            ) {
+                req = req.header(name, val);
+            }
+        }
+    }
+
+    let req = req.body(Body::empty()).map_err(|e| {
+        error!("Failed to create request body: {:?}", e);
+        ApiError::InternalServerError
+    })?;
+
+    debug!("Sending request to OpenAI models endpoint");
+    // Send the request to OpenAI
+    let res = client.request(req).await.map_err(|e| {
+        error!("Failed to send request to OpenAI: {:?}", e);
+        ApiError::InternalServerError
+    })?;
+
+    // Check if the response is successful
+    if !res.status().is_success() {
+        error!("OpenAI API returned non-success status: {}", res.status());
+
+        // Log headers
+        debug!("Response headers: {:?}", res.headers());
+
+        // Read and log the response body
+        let body_bytes = to_bytes(res.into_body()).await.map_err(|e| {
+            error!("Failed to read response body: {:?}", e);
+            ApiError::InternalServerError
+        })?;
+
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        error!("Response body: {}", body_str);
+
+        return Err(ApiError::InternalServerError);
+    }
+
+    debug!("Successfully received response from OpenAI models endpoint");
+
+    // Read the response body
+    let body_bytes = to_bytes(res.into_body()).await.map_err(|e| {
+        error!("Failed to read response body: {:?}", e);
+        ApiError::InternalServerError
+    })?;
+
+    // Parse the response as JSON
+    let models_response: Value = serde_json::from_slice(&body_bytes).map_err(|e| {
+        error!("Failed to parse models response: {:?}", e);
+        ApiError::InternalServerError
+    })?;
+
+    debug!("Exiting proxy_models function");
+    // Encrypt and return the response
+    encrypt_response(&state, &session_id, &models_response).await
 }
