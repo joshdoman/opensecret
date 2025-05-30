@@ -30,8 +30,9 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v16
 
-      - name: Enable Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v8
+      # Temporarily disabled - waiting for hosted solution account
+      # - name: Enable Magic Nix Cache
+      #   uses: DeterminateSystems/magic-nix-cache-action@v8
 
       - name: Check flake.lock health
         uses: DeterminateSystems/flake-checker-action@v9
@@ -93,8 +94,9 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v16
 
-      - name: Enable Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v8
+      # Temporarily disabled - waiting for hosted solution account
+      # - name: Enable Magic Nix Cache
+      #   uses: DeterminateSystems/magic-nix-cache-action@v8
 
       - name: Check flake.lock health
         uses: DeterminateSystems/flake-checker-action@v9
