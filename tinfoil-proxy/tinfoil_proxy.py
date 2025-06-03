@@ -88,7 +88,15 @@ class TinfoilProxyServer:
         # Initialize Tinfoil clients for each model
         self.clients: Dict[str, TinfoilAI] = {}
         
-        for model_name, config in MODEL_CONFIGS.items():
+        # Temporarily only initialize deepseek model
+        models_to_init = ["deepseek-r1-70b"]  # Comment out to load all: MODEL_CONFIGS.keys()
+        
+        for model_name in models_to_init:
+            if model_name not in MODEL_CONFIGS:
+                logger.error(f"Model {model_name} not found in MODEL_CONFIGS")
+                continue
+                
+            config = MODEL_CONFIGS[model_name]
             try:
                 # Debug info for attestation
                 import traceback
