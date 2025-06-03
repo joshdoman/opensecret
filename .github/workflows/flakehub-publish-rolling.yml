@@ -11,6 +11,8 @@ jobs:
       contents: "read"
     steps:
       - uses: "actions/checkout@v4"
+        with:
+          submodules: recursive
       - uses: "DeterminateSystems/determinate-nix-action@v3"
       - uses: "DeterminateSystems/flakehub-cache-action@main"
       - uses: "DeterminateSystems/flakehub-push@main"
