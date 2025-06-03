@@ -137,10 +137,11 @@
               # Set up Python environment
               export PYTHONPATH="$(find ${pkgs.python3}/lib -name site-packages):$PYTHONPATH"
 
-              # Copy opensecret and continuum-proxy to their locations
+              # Copy opensecret, continuum-proxy and tinfoil-proxy to their locations
               mkdir -p /app
               install -m 755 ${opensecret}/bin/opensecret /app/
               install -m 755 ${continuum-proxy}/bin/continuum-proxy /app/
+              install -m 755 ${tinfoil-proxy}/bin/tinfoil-proxy /app/
 
               ${builtins.readFile ./entrypoint.sh}
             '')
@@ -159,11 +160,6 @@
               text = builtins.readFile ./nitro-toolkit/vsock_helper.py;
               destination = "/app/vsock_helper.py";
             })
-            (pkgs.runCommand "tinfoil-proxy" {} ''
-              mkdir -p $out/app
-              cp ${./tinfoil-proxy/dist/tinfoil-proxy} $out/app/tinfoil-proxy
-              chmod +x $out/app/tinfoil-proxy
-            '')
             # Runtime dependencies for tinfoil-proxy
             pkgs.glibc
             pkgs.zlib
@@ -180,6 +176,7 @@
             pkgs.curl
             nitro-bins
             continuum-proxy
+            tinfoil-proxy
           ];
           pathsToLink = [ "/bin" "/lib" "/app" "/usr/bin" "/usr/sbin" "/sbin" ];
         };
@@ -253,6 +250,13 @@
           mkdir -p $out/bin
           cp ${./continuum-proxy} $out/bin/continuum-proxy
           chmod +x $out/bin/continuum-proxy
+        '';
+
+        # Copy tinfoil-proxy from local filesystem
+        tinfoil-proxy = pkgs.runCommand "tinfoil-proxy" {} ''
+          mkdir -p $out/bin
+          cp ${./tinfoil-proxy/dist/tinfoil-proxy} $out/bin/tinfoil-proxy
+          chmod +x $out/bin/tinfoil-proxy
         '';
 
         arch = pkgs.stdenv.hostPlatform.uname.processor;
