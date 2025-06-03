@@ -241,6 +241,7 @@
       {
         packages = {
           default = opensecret;
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           eif-dev = mkEif "dev";
           eif-prod = mkEif "prod";
           eif-preview = mkEif "preview";

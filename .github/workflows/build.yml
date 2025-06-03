@@ -19,6 +19,9 @@ jobs:
     # Custom runner required: ARM64 architecture needed for AWS Nitro Enclaves
     # 4 cores needed for efficient builds and PCR verification
     runs-on: ubuntu-22.04-arm64-4core
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -28,14 +31,13 @@ jobs:
 
       # Setup Nix with caching for faster builds
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v16
-
-      # Temporarily disabled - waiting for hosted solution account
-      # - name: Enable Magic Nix Cache
-      #   uses: DeterminateSystems/magic-nix-cache-action@v8
+        uses: DeterminateSystems/determinate-nix-action@v3
+      
+      - name: Enable FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@main
 
       - name: Check flake.lock health
-        uses: DeterminateSystems/flake-checker-action@v9
+        uses: DeterminateSystems/flake-checker-action@v10
         with:
           flake-lock-path: flake.lock
 
@@ -83,6 +85,9 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
     # Same custom runner requirements as dev build
     runs-on: ubuntu-22.04-arm64-4core
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -92,14 +97,13 @@ jobs:
 
       # Setup Nix with caching for faster builds
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v16
-
-      # Temporarily disabled - waiting for hosted solution account
-      # - name: Enable Magic Nix Cache
-      #   uses: DeterminateSystems/magic-nix-cache-action@v8
+        uses: DeterminateSystems/determinate-nix-action@v3
+      
+      - name: Enable FlakeHub Cache
+        uses: DeterminateSystems/flakehub-cache-action@main
 
       - name: Check flake.lock health
-        uses: DeterminateSystems/flake-checker-action@v9
+        uses: DeterminateSystems/flake-checker-action@v10
         with:
           flake-lock-path: flake.lock
 
