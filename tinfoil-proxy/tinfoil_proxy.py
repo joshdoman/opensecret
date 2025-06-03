@@ -8,6 +8,8 @@ import os
 import sys
 import json
 import logging
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional, AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -54,13 +56,13 @@ class ChatMessage(BaseModel):
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: list[ChatMessage]
-    stream: Optional[bool] = Field(default=True)
-    temperature: Optional[float] = Field(default=1.0, ge=0.0, le=2.0)
+    stream: Optional[bool] = Field(default=None)
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
     max_tokens: Optional[int] = Field(default=None)
-    top_p: Optional[float] = Field(default=1.0)
-    frequency_penalty: Optional[float] = Field(default=0.0)
-    presence_penalty: Optional[float] = Field(default=0.0)
-    n: Optional[int] = Field(default=1)
+    top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    frequency_penalty: Optional[float] = Field(default=None, ge=-2.0, le=2.0)
+    presence_penalty: Optional[float] = Field(default=None, ge=-2.0, le=2.0)
+    n: Optional[int] = Field(default=1, ge=1)
     stop: Optional[list[str]] = Field(default=None)
     stream_options: Optional[dict] = Field(default=None)
 
@@ -79,6 +81,9 @@ class TinfoilProxyServer:
         self.api_key = os.getenv("TINFOIL_API_KEY")
         if not self.api_key:
             raise ValueError("TINFOIL_API_KEY environment variable is required")
+        
+        # Initialize thread pool for blocking operations
+        self.executor = ThreadPoolExecutor(max_workers=100)
         
         # Initialize Tinfoil clients for each model
         self.clients: Dict[str, TinfoilAI] = {}
@@ -117,22 +122,62 @@ class TinfoilProxyServer:
             # Convert messages to the format expected by Tinfoil
             messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
             
-            # Create streaming chat completion
-            stream = client.chat.completions.create(
-                model=request.model,
-                messages=messages,
-                stream=True,
-                temperature=request.temperature,
-                max_tokens=request.max_tokens,
-                top_p=request.top_p,
-                frequency_penalty=request.frequency_penalty,
-                presence_penalty=request.presence_penalty,
-                n=request.n,
-                stop=request.stop,
-            )
+            # Create a queue for async iteration
+            queue = asyncio.Queue()
+            loop = asyncio.get_event_loop()
+            
+            # Function to iterate over stream in thread pool
+            def process_stream():
+                try:
+                    # Prepare kwargs for Tinfoil client - only include non-None values
+                    create_kwargs = {
+                        "model": request.model,
+                        "messages": messages,
+                        "stream": True,
+                    }
+                    
+                    # Add optional parameters only if provided
+                    if request.temperature is not None:
+                        create_kwargs["temperature"] = request.temperature
+                    if request.max_tokens is not None:
+                        create_kwargs["max_tokens"] = request.max_tokens
+                    if request.top_p is not None:
+                        create_kwargs["top_p"] = request.top_p
+                    if request.frequency_penalty is not None:
+                        create_kwargs["frequency_penalty"] = request.frequency_penalty
+                    if request.presence_penalty is not None:
+                        create_kwargs["presence_penalty"] = request.presence_penalty
+                    if request.n is not None:
+                        create_kwargs["n"] = request.n
+                    if request.stop is not None:
+                        create_kwargs["stop"] = request.stop
+                    if request.stream_options:
+                        create_kwargs["stream_options"] = request.stream_options
+                    
+                    stream = client.chat.completions.create(**create_kwargs)
+                    
+                    for chunk in stream:
+                        # Put chunk in queue for async consumption
+                        asyncio.run_coroutine_threadsafe(queue.put(chunk), loop)
+                    
+                    # Signal end of stream
+                    asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+                except Exception as e:
+                    # Put exception in queue
+                    asyncio.run_coroutine_threadsafe(queue.put(e), loop)
+            
+            # Start processing in thread pool
+            loop.run_in_executor(self.executor, process_stream)
             
             # Stream responses in SSE format
-            for chunk in stream:
+            while True:
+                chunk = await queue.get()
+                
+                # Check for end of stream or error
+                if chunk is None:
+                    break
+                if isinstance(chunk, Exception):
+                    raise chunk
                 # Convert to OpenAI-compatible format
                 chunk_data = {
                     "id": chunk.id,
@@ -189,17 +234,36 @@ class TinfoilProxyServer:
         try:
             messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
             
-            response = client.chat.completions.create(
-                model=request.model,
-                messages=messages,
-                stream=False,
-                temperature=request.temperature,
-                max_tokens=request.max_tokens,
-                top_p=request.top_p,
-                frequency_penalty=request.frequency_penalty,
-                presence_penalty=request.presence_penalty,
-                n=request.n,
-                stop=request.stop,
+            # Prepare kwargs for Tinfoil client - only include non-None values
+            create_kwargs = {
+                "model": request.model,
+                "messages": messages,
+                "stream": False,
+            }
+            
+            # Add optional parameters only if provided
+            if request.temperature is not None:
+                create_kwargs["temperature"] = request.temperature
+            if request.max_tokens is not None:
+                create_kwargs["max_tokens"] = request.max_tokens
+            if request.top_p is not None:
+                create_kwargs["top_p"] = request.top_p
+            if request.frequency_penalty is not None:
+                create_kwargs["frequency_penalty"] = request.frequency_penalty
+            if request.presence_penalty is not None:
+                create_kwargs["presence_penalty"] = request.presence_penalty
+            if request.n is not None:
+                create_kwargs["n"] = request.n
+            if request.stop is not None:
+                create_kwargs["stop"] = request.stop
+            if request.stream_options:
+                create_kwargs["stream_options"] = request.stream_options
+            
+            # Run blocking call in thread pool
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: client.chat.completions.create(**create_kwargs)
             )
             
             # Convert to OpenAI-compatible format
