@@ -843,7 +843,7 @@ Add these lines:
 - {address: tuf-repo-cdn.sigstore.dev, port: 443}
 - {address: deepseek-r1-70b-p.model.tinfoil.sh, port: 443}
 - {address: kds-proxy.tinfoil.sh, port: 443}
-- {address: github-proxy.tinfoil.sh, port: 443}
+- {address: gh-attestation-proxy.tinfoil.sh, port: 443}
 ```
 
 Restart the nitro vsock proxy service:
@@ -944,7 +944,7 @@ After=network.target
 
 [Service]
 User=root
-ExecStart=/usr/bin/vsock-proxy 8023 github-proxy.tinfoil.sh 443
+ExecStart=/usr/bin/vsock-proxy 8023 gh-attestation-proxy.tinfoil.sh 443
 Restart=always
 
 [Install]

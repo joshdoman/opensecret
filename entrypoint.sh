@@ -273,7 +273,7 @@ echo "127.0.0.16 api-github-proxy.tinfoil.sh" >> /etc/hosts
 echo "127.0.0.17 tuf-repo-cdn.sigstore.dev" >> /etc/hosts
 echo "127.0.0.18 deepseek-r1-70b-p.model.tinfoil.sh" >> /etc/hosts
 echo "127.0.0.19 kds-proxy.tinfoil.sh" >> /etc/hosts
-echo "127.0.0.20 github-proxy.tinfoil.sh" >> /etc/hosts
+echo "127.0.0.20 gh-attestation-proxy.tinfoil.sh" >> /etc/hosts
 log "Added Tinfoil proxy domains to /etc/hosts"
 
 touch /app/libnsm.so
@@ -623,14 +623,19 @@ if [ "$APP_MODE" != "local" ]; then
 
     # Wait for the proxy to start
     sleep 5
+    
+    # Set TINFOIL_API_BASE for nitro mode
+    export TINFOIL_API_BASE="http://127.0.0.1:8093"
 else
     # For local mode, use the default OpenAI API base or the one set in the environment
     export OPENAI_API_BASE=${OPENAI_API_BASE:-"https://api.openai.com"}
+    # No tinfoil proxy in local mode
+    export TINFOIL_API_BASE=""
 fi
 
 # Start the opensecret
 log "Starting opensecret..."
-RUST_LOG_STYLE=never RUST_LOG=debug APP_MODE="$APP_MODE" OPENAI_API_BASE="$OPENAI_API_BASE" /app/opensecret &
+RUST_LOG_STYLE=never RUST_LOG=debug APP_MODE="$APP_MODE" OPENAI_API_BASE="$OPENAI_API_BASE" TINFOIL_API_BASE="$TINFOIL_API_BASE" /app/opensecret &
 
 # Wait for the opensecret to start
 log "Waiting for opensecret to start"

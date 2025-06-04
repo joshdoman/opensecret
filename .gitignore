@@ -44,5 +44,6 @@ tinfoil-proxy/venv/
 __pycache__/
 tinfoil-proxy/build/
 tinfoil-proxy/*.spec
+tuf-repo-cdn.sigstore.dev.json
 # Keep the binary
 !tinfoil-proxy/dist/tinfoil-proxy

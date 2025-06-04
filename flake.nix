@@ -38,16 +38,8 @@
           pkgs.python3
           (pkgs.python3.withPackages (ps: with ps; [
             cryptography
-            # For tinfoil proxy - we'll use pip in virtualenv
-            pip
-            virtualenv
           ]))
-          # Binary analysis and patching tools
-          pkgs.patchelf
-          pkgs.binutils
-          pkgs.file
-          # nix-ld for running FHS binaries
-          pkgs.nix-ld
+          pkgs.go
         ];
         linuxOnlyInputs = [
           pkgs.podman
@@ -116,7 +108,6 @@
               ln -sf ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt /etc/ssl/certs/ca-bundle.crt
               export SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt
               export AWS_CA_BUNDLE=/etc/ssl/certs/ca-bundle.crt
-              export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-bundle.crt
               
               # Copy required libraries and tools
               mkdir -p /lib
@@ -132,12 +123,11 @@
               cp -P ${pkgs.glibc}/lib/libpthread.so* /lib/
               cp -P ${pkgs.glibc}/lib/librt.so* /lib/
               cp -P ${pkgs.glibc}/lib/libm.so* /lib/
-              cp -P ${pkgs.zlib}/lib/libz.so* /lib/
               
               # Set up Python environment
               export PYTHONPATH="$(find ${pkgs.python3}/lib -name site-packages):$PYTHONPATH"
 
-              # Copy opensecret, continuum-proxy and tinfoil-proxy to their locations
+              # Copy opensecret and continuum-proxy to their locations
               mkdir -p /app
               install -m 755 ${opensecret}/bin/opensecret /app/
               install -m 755 ${continuum-proxy}/bin/continuum-proxy /app/
@@ -160,9 +150,6 @@
               text = builtins.readFile ./nitro-toolkit/vsock_helper.py;
               destination = "/app/vsock_helper.py";
             })
-            # Runtime dependencies for tinfoil-proxy
-            pkgs.glibc
-            pkgs.zlib
             pkgs.bash
             pkgs.busybox
             pkgs.openssl
@@ -274,22 +261,10 @@
           packages = inputs;
           shellHook = ''
             export LIBCLANG_PATH=${pkgs.libclang.lib}/lib/
-            export LD_LIBRARY_PATH=${pkgs.openssl}/lib:${pkgs.zlib}/lib:$LD_LIBRARY_PATH
+            export LD_LIBRARY_PATH=${pkgs.openssl}/lib:$LD_LIBRARY_PATH
             export CC_wasm32_unknown_unknown=${pkgs.llvmPackages_14.clang-unwrapped}/bin/clang-14
             export CFLAGS_wasm32_unknown_unknown="-I ${pkgs.llvmPackages_14.libclang.lib}/lib/clang/14.0.6/include/"
             export PKG_CONFIG_PATH=${pkgs.openssl.dev}/lib/pkgconfig
-            
-            # Setup nix-ld for running FHS binaries
-            export NIX_LD_LIBRARY_PATH="${pkgs.glibc}/lib:${pkgs.zlib}/lib:${pkgs.stdenv.cc.cc.lib}/lib"
-            export NIX_LD="${pkgs.glibc}/lib/ld-linux-aarch64.so.1"
-            
-            # SSL certificate paths for PyInstaller binaries
-            export SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-            export SSL_CERT_DIR="${pkgs.cacert}/etc/ssl/certs"
-            export REQUESTS_CA_BUNDLE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-            
-            # Alias for running tinfoil-proxy binary
-            alias tinfoil-proxy='SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" nix-ld tinfoil-proxy/dist/tinfoil-proxy'
 
             ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
               alias docker='podman'
