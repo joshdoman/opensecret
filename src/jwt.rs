@@ -19,6 +19,9 @@ use uuid::Uuid;
 
 use crate::db::DBError;
 use crate::{ApiError, AppState};
+use jsonwebtoken::{
+    encode as jwt_encode, Algorithm as JwtAlgorithm, EncodingKey, Header as JwtHeader,
+};
 use url::Url;
 
 use crate::models::{platform_users::PlatformUser, users::User};
@@ -205,25 +208,24 @@ impl NewToken {
                         },
                     )?;
 
-                // Create a new JwtKeys instance with the custom secret
-                let custom_keys = JwtKeys::new(decrypted_key).map_err(|e| {
-                    tracing::error!(
-                        "Failed to create JWT keys from custom secret for project {}: {:?}",
-                        project_client_id,
-                        e
-                    );
+                // For custom secrets, use HS256 algorithm (HMAC with shared secret)
+                // This is what third-party services like Supabase expect
+                tracing::debug!(
+                    "Using custom JWT secret with HS256 for project {}",
+                    project_client_id
+                );
+
+                // Create HS256 header
+                let jwt_header = JwtHeader::new(JwtAlgorithm::HS256);
+
+                // Create encoding key from the decrypted secret
+                let encoding_key = EncodingKey::from_secret(&decrypted_key);
+
+                // Encode the token using HS256
+                jwt_encode(&jwt_header, claims, &encoding_key).map_err(|e| {
+                    tracing::error!("Error creating HS256 token with custom secret: {:?}", e);
                     ApiError::InternalServerError
-                })?;
-
-                tracing::debug!("Using custom JWT secret for project {}", project_client_id);
-                let es256k = Es256k::<Sha256>::new(custom_keys.secp.clone());
-
-                es256k
-                    .token(header, claims, &custom_keys.signing_key)
-                    .map_err(|e| {
-                        tracing::error!("Error creating token with custom secret: {:?}", e);
-                        ApiError::InternalServerError
-                    })
+                })
             }
             Ok(None) => {
                 // No custom secret found, use the default key
