@@ -67,6 +67,8 @@ pub struct ProxyRouter {
     default_proxy: ProxyConfig,
     // Additional proxy configurations (e.g., tinfoil)
     additional_proxies: Vec<ProxyConfig>,
+    // Tinfoil proxy base URL if configured
+    tinfoil_base_url: Option<String>,
 }
 
 impl ProxyRouter {
@@ -89,9 +91,9 @@ impl ProxyRouter {
 
         // Collect additional proxies
         let mut additional_proxies = Vec::new();
-        if let Some(base) = tinfoil_base {
+        if let Some(ref base) = tinfoil_base {
             additional_proxies.push(ProxyConfig {
-                base_url: base,
+                base_url: base.clone(),
                 api_key: None, // Tinfoil proxy doesn't need API key
             });
         }
@@ -100,13 +102,13 @@ impl ProxyRouter {
             cache,
             default_proxy,
             additional_proxies,
+            tinfoil_base_url: tinfoil_base,
         }
     }
 
     /// Get the Tinfoil proxy base URL if configured
     pub fn get_tinfoil_base_url(&self) -> Option<String> {
-        // The first additional proxy is the Tinfoil proxy if configured
-        self.additional_proxies.first().map(|p| p.base_url.clone())
+        self.tinfoil_base_url.clone()
     }
 
     pub async fn get_proxy_for_model(&self, model_name: &str) -> ProxyConfig {

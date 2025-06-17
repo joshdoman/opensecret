@@ -1,5 +1,5 @@
 pub mod attestation_routes;
-mod documents;
+pub mod documents;
 pub mod encryption_middleware;
 mod health_routes;
 pub mod login_routes;

@@ -90,8 +90,6 @@ async fn upload_document(
         return Err(ApiError::BadRequest);
     }
 
-    let _file_size = file_data.len() as i64;
-
     // Create multipart form data for tinfoil proxy
     let boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
     let mut multipart_body = Vec::new();
