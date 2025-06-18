@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/openai/openai-go"
@@ -407,6 +408,9 @@ func (s *TinfoilProxyServer) uploadDocument(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get secure HTTP client"})
 		return
 	}
+	
+	// Set a longer timeout for document uploads (5 minutes)
+	httpClient.Timeout = 5 * 60 * time.Second
 	
 	// Add API key if available
 	apiKey := os.Getenv("TINFOIL_API_KEY")

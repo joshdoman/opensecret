@@ -7,6 +7,7 @@ use hyper::{Body, Client, Request};
 use hyper_tls::HttpsConnector;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio::time::timeout;
 use tracing::{debug, error};
 use uuid::Uuid;
 
@@ -41,7 +42,6 @@ async fn upload_document(
     axum::Extension(body): axum::Extension<DocumentUploadRequest>,
 ) -> Result<Json<EncryptedResponse<DocumentUploadResponse>>, ApiError> {
     debug!("Entering upload_document function for user: {}", user.uuid);
-    debug!("Filename: {}", body.filename);
 
     // Prevent guest users from using the document upload feature
     if user.is_guest() {
@@ -114,9 +114,11 @@ async fn upload_document(
         ApiError::InternalServerError
     })?;
 
-    // Create a new hyper client
+    // Create a new hyper client with longer timeout for document processing
     let https = HttpsConnector::new();
-    let client = Client::builder().build::<_, Body>(https);
+    let client = Client::builder()
+        .pool_idle_timeout(std::time::Duration::from_secs(300)) // 5 minutes
+        .build::<_, Body>(https);
 
     // Prepare the request to tinfoil proxy
     let req = Request::builder()
@@ -134,8 +136,17 @@ async fn upload_document(
 
     debug!("Sending document to Tinfoil proxy");
 
-    // Send the request to Tinfoil proxy
-    let res = client.request(req).await.map_err(|e| {
+    // Send the request to Tinfoil proxy with 5 minute timeout
+    let res = timeout(
+        std::time::Duration::from_secs(300), // 5 minutes
+        client.request(req),
+    )
+    .await
+    .map_err(|_| {
+        error!("Request to Tinfoil proxy timed out after 5 minutes");
+        ApiError::InternalServerError
+    })?
+    .map_err(|e| {
         error!("Failed to send request to Tinfoil proxy: {:?}", e);
         ApiError::InternalServerError
     })?;
