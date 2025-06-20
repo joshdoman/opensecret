@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -392,8 +393,11 @@ func (s *TinfoilProxyServer) uploadDocument(c *gin.Context) {
 		return
 	}
 
-	// Create the request to Tinfoil document upload service
-	req, err := http.NewRequest("POST", "https://doc-upload.model.tinfoil.sh/v1alpha/convert/file", &requestBody)
+	// Create the request to Tinfoil document upload service with a 5-minute timeout context
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://doc-upload.model.tinfoil.sh/v1alpha/convert/file", &requestBody)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create request"})
 		return
@@ -409,9 +413,6 @@ func (s *TinfoilProxyServer) uploadDocument(c *gin.Context) {
 		return
 	}
 	
-	// Set a longer timeout for document uploads (5 minutes)
-	httpClient.Timeout = 5 * 60 * time.Second
-	
 	// Add API key if available
 	apiKey := os.Getenv("TINFOIL_API_KEY")
 	if apiKey != "" {
@@ -421,6 +422,7 @@ func (s *TinfoilProxyServer) uploadDocument(c *gin.Context) {
 	// Send the request using the secure client
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		log.Printf("HTTP request failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to upload document"})
 		return
 	}
