@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/openai/openai-go"
@@ -38,6 +43,15 @@ var modelConfigs = map[string]struct {
 		Enclave:     "nomic-embed-text.model.tinfoil.sh",
 		Repo:        "tinfoilsh/confidential-nomic-embed-text",
 	},
+}
+
+// Document upload service configuration
+var docUploadConfig = struct {
+	Enclave string
+	Repo    string
+}{
+	Enclave: "doc-upload.model.tinfoil.sh",
+	Repo:    "tinfoilsh/confidential-doc-upload",
 }
 
 // Request/Response models
@@ -94,8 +108,21 @@ type ChatCompletionResponse struct {
 	Usage   *Usage   `json:"usage,omitempty"`
 }
 
+type DocumentUploadRequest struct {
+	Filename      string `json:"filename"`
+	ContentBase64 string `json:"content_base64"`
+}
+
+type DocumentUploadResponse struct {
+	Text     string `json:"text"`
+	Filename string `json:"filename"`
+	Size     int64  `json:"size"`
+}
+
 type TinfoilProxyServer struct {
-	clients map[string]*tinfoil.Client
+	clients       map[string]*tinfoil.Client
+	docUploadClient *tinfoil.Client
+	docUploadSecureClient *tinfoil.SecureClient
 }
 
 func NewTinfoilProxyServer() (*TinfoilProxyServer, error) {
@@ -133,6 +160,36 @@ func NewTinfoilProxyServer() (*TinfoilProxyServer, error) {
 		
 		server.clients[modelName] = client
 		log.Printf("Successfully initialized Tinfoil client for model: %s", modelName)
+	}
+
+	// Initialize document upload service separately
+	log.Printf("Initializing document upload service")
+	docClient, err := tinfoil.NewClientWithParams(
+		docUploadConfig.Enclave,
+		docUploadConfig.Repo,
+		option.WithAPIKey(apiKey),
+	)
+	if err != nil {
+		log.Printf("Failed to initialize document upload service: %v", err)
+		// Don't fail if doc upload service can't be initialized
+	} else {
+		server.docUploadClient = docClient
+		// Also create a SecureClient for HTTP requests
+		server.docUploadSecureClient = tinfoil.NewSecureClient(
+			docUploadConfig.Enclave,
+			docUploadConfig.Repo,
+		)
+		
+		// Verify the enclave
+		_, err = server.docUploadSecureClient.Verify()
+		if err != nil {
+			log.Printf("Failed to verify document upload enclave: %v", err)
+			server.docUploadSecureClient = nil
+		} else {
+			log.Printf("Successfully verified document upload enclave")
+		}
+		
+		log.Printf("Successfully initialized document upload service")
 	}
 
 	if len(server.clients) == 0 {
@@ -290,6 +347,130 @@ func (s *TinfoilProxyServer) streamChatCompletion(c *gin.Context, req ChatComple
 	flusher.Flush()
 }
 
+func (s *TinfoilProxyServer) uploadDocument(c *gin.Context) {
+	// Get the uploaded file
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No file uploaded"})
+		return
+	}
+	defer file.Close()
+
+	// Check file size (limit to 10MB)
+	if header.Size > 10*1024*1024 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "File size exceeds 10MB limit"})
+		return
+	}
+
+	// Verify that document upload service is available
+	if s.docUploadSecureClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Document upload service not available"})
+		return
+	}
+
+	// Create a buffer and multipart writer for the request
+	var requestBody bytes.Buffer
+	writer := multipart.NewWriter(&requestBody)
+
+	// Create a form file field
+	part, err := writer.CreateFormFile("files", header.Filename)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create form file"})
+		return
+	}
+
+	// Copy the uploaded file to the form
+	_, err = io.Copy(part, file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to copy file"})
+		return
+	}
+
+	// Close the multipart writer
+	err = writer.Close()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to close writer"})
+		return
+	}
+
+	// Create the request to Tinfoil document upload service with a 5-minute timeout context
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://doc-upload.model.tinfoil.sh/v1alpha/convert/file", &requestBody)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create request"})
+		return
+	}
+
+	// Set the content type with boundary
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	// Get the secure HTTP client from the SecureClient
+	httpClient, err := s.docUploadSecureClient.HTTPClient()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get secure HTTP client"})
+		return
+	}
+	
+	// Add API key if available
+	apiKey := os.Getenv("TINFOIL_API_KEY")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	
+	// Send the request using the secure client
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		log.Printf("HTTP request failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to upload document"})
+		return
+	}
+	defer resp.Body.Close()
+
+	// Read the response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read response"})
+		return
+	}
+
+	// Check for non-200 status
+	if resp.StatusCode != http.StatusOK {
+		c.JSON(resp.StatusCode, gin.H{"error": "Document processing failed"})
+		return
+	}
+
+	// Parse the response from Tinfoil
+	var tinfoilResponse map[string]interface{}
+	if err := json.Unmarshal(body, &tinfoilResponse); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse response"})
+		return
+	}
+
+	// Extract the text content from the response
+	// The exact structure depends on Tinfoil's response format
+	// For now, we'll assume it returns the text directly
+	text := ""
+	if textValue, ok := tinfoilResponse["text"]; ok {
+		text = fmt.Sprintf("%v", textValue)
+	} else if contentValue, ok := tinfoilResponse["content"]; ok {
+		text = fmt.Sprintf("%v", contentValue)
+	} else {
+		// If we can't find a text field, return the whole response as JSON string
+		text = string(body)
+	}
+
+	// Return the extracted text
+	response := DocumentUploadResponse{
+		Text:     text,
+		Filename: header.Filename,
+		Size:     header.Size,
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
 func (s *TinfoilProxyServer) nonStreamingChatCompletion(c *gin.Context, req ChatCompletionRequest) {
 	client, err := s.getClient(req.Model)
 	if err != nil {
@@ -436,6 +617,9 @@ func main() {
 			server.nonStreamingChatCompletion(c, req)
 		}
 	})
+
+	// Document upload endpoint
+	r.POST("/v1/documents/upload", server.uploadDocument)
 
 	// Start server
 	port := os.Getenv("TINFOIL_PROXY_PORT")
