@@ -452,6 +452,14 @@ update-pcr-prod:
     just append-pcr-prod
     echo "✅ PCR prod values updated and history appended"
 
+# Update all PCR values for both dev and prod environments
+update-pcr-all:
+    just copy-pcr-dev
+    just append-pcr-dev
+    just copy-pcr-prod
+    just append-pcr-prod
+    echo "✅ All PCR values updated and history appended for both dev and prod"
+
 
 # Generate a key pair for PCR signing and output to terminal (no files created)
 generate-pcr-keys:
