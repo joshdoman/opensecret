@@ -132,6 +132,13 @@ type JobStatus struct {
 	TaskStatus string `json:"task_status,omitempty"`
 }
 
+type DocumentStatusResponse struct {
+	Status   string                  `json:"status"`
+	Progress *int                    `json:"progress,omitempty"`
+	Error    *string                 `json:"error,omitempty"`
+	Document *DocumentUploadResponse `json:"document,omitempty"`
+}
+
 type TinfoilProxyServer struct {
 	clients       map[string]*tinfoil.Client
 	docUploadClient *tinfoil.Client
@@ -471,147 +478,143 @@ func (s *TinfoilProxyServer) uploadDocument(c *gin.Context) {
 
 	log.Printf("Started async document processing with task ID: %s", asyncResp.TaskID)
 
-	// Now poll for the result
-	pollCtx, pollCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer pollCancel()
+	// Return the task ID immediately so frontend can poll
+	c.JSON(http.StatusAccepted, gin.H{
+		"task_id": asyncResp.TaskID,
+		"filename": header.Filename,
+		"size": header.Size,
+	})
+}
 
-	// Poll every 2 seconds
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
+func (s *TinfoilProxyServer) checkDocumentStatus(c *gin.Context) {
+	taskID := c.Param("taskId")
+	if taskID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Task ID is required"})
+		return
+	}
 
-	for {
-		select {
-		case <-pollCtx.Done():
-			c.JSON(http.StatusRequestTimeout, gin.H{"error": "Document processing timeout"})
+	// Verify that document upload service is available
+	if s.docUploadSecureClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Document upload service not available"})
+		return
+	}
+
+	// Get the secure HTTP client
+	httpClient, err := s.docUploadSecureClient.HTTPClient()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get secure HTTP client"})
+		return
+	}
+
+	// Add API key if available
+	apiKey := os.Getenv("TINFOIL_API_KEY")
+
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Check status
+	statusReq, err := http.NewRequestWithContext(ctx, "GET",
+		fmt.Sprintf("https://doc-upload.model.tinfoil.sh/v1alpha/status/poll/%s", taskID),
+		nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create status request"})
+		return
+	}
+
+	if apiKey != "" {
+		statusReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	statusResp, err := httpClient.Do(statusReq)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check status"})
+		return
+	}
+	defer statusResp.Body.Close()
+
+	statusBody, err := io.ReadAll(statusResp.Body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read status response"})
+		return
+	}
+
+	var status JobStatus
+	if err := json.Unmarshal(statusBody, &status); err != nil {
+		log.Printf("Failed to parse status response: %v, body: %s", err, string(statusBody))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse status response"})
+		return
+	}
+
+	// Try to determine the actual status field
+	actualStatus := status.Status
+	if actualStatus == "" {
+		actualStatus = status.State
+	}
+	if actualStatus == "" {
+		actualStatus = status.TaskStatus
+	}
+
+	// Create response
+	response := DocumentStatusResponse{
+		Status:   actualStatus,
+		Progress: status.Progress,
+		Error:    status.Error,
+	}
+
+	// If the task is complete, fetch the result
+	if actualStatus == "success" {
+		resultReq, err := http.NewRequestWithContext(ctx, "GET",
+			fmt.Sprintf("https://doc-upload.model.tinfoil.sh/v1alpha/result/%s", taskID),
+			nil)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create result request"})
 			return
-		case <-ticker.C:
-			// Check status
-			statusReq, err := http.NewRequestWithContext(pollCtx, "GET", 
-				fmt.Sprintf("https://doc-upload.model.tinfoil.sh/v1alpha/status/poll/%s", asyncResp.TaskID), 
-				nil)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create status request"})
-				return
-			}
+		}
 
-			if apiKey != "" {
-				statusReq.Header.Set("Authorization", "Bearer "+apiKey)
-			}
+		if apiKey != "" {
+			resultReq.Header.Set("Authorization", "Bearer "+apiKey)
+		}
 
-			statusResp, err := httpClient.Do(statusReq)
-			if err != nil {
-				log.Printf("Status check failed: %v", err)
-				continue // Try again
-			}
+		resultResp, err := httpClient.Do(resultReq)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get result"})
+			return
+		}
+		defer resultResp.Body.Close()
 
-			statusBody, err := io.ReadAll(statusResp.Body)
-			statusResp.Body.Close()
-			if err != nil {
-				log.Printf("Failed to read status response: %v", err)
-				continue
-			}
+		resultBody, err := io.ReadAll(resultResp.Body)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read result"})
+			return
+		}
 
-			var status JobStatus
-			if err := json.Unmarshal(statusBody, &status); err != nil {
-				log.Printf("Failed to parse status response: %v, body: %s", err, string(statusBody))
-				continue
-			}
+		// Parse the result
+		var resultData map[string]interface{}
+		if err := json.Unmarshal(resultBody, &resultData); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse result"})
+			return
+		}
 
-			// Try to determine the actual status field
-			actualStatus := status.Status
-			if actualStatus == "" {
-				actualStatus = status.State
-			}
-			if actualStatus == "" {
-				actualStatus = status.TaskStatus
-			}
-			
-			// Debug log the raw response if status is still empty
-			if actualStatus == "" {
-				log.Printf("Empty status received. Raw response: %s", string(statusBody))
-				// Try to parse as a generic map to see the structure
-				var genericResp map[string]interface{}
-				if err := json.Unmarshal(statusBody, &genericResp); err == nil {
-					log.Printf("Parsed response structure: %+v", genericResp)
-				}
-			}
+		// Extract text from result
+		text := ""
+		if textValue, ok := resultData["text"]; ok {
+			text = fmt.Sprintf("%v", textValue)
+		} else if contentValue, ok := resultData["content"]; ok {
+			text = fmt.Sprintf("%v", contentValue)
+		} else {
+			// Return the whole result as text
+			text = string(resultBody)
+		}
 
-			log.Printf("Task %s status: %s", asyncResp.TaskID, actualStatus)
-
-			switch actualStatus {
-			case "success":
-				// Get the result
-				resultReq, err := http.NewRequestWithContext(pollCtx, "GET",
-					fmt.Sprintf("https://doc-upload.model.tinfoil.sh/v1alpha/result/%s", asyncResp.TaskID),
-					nil)
-				if err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create result request"})
-					return
-				}
-
-				if apiKey != "" {
-					resultReq.Header.Set("Authorization", "Bearer "+apiKey)
-				}
-
-				resultResp, err := httpClient.Do(resultReq)
-				if err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get result"})
-					return
-				}
-				defer resultResp.Body.Close()
-
-				resultBody, err := io.ReadAll(resultResp.Body)
-				if err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read result"})
-					return
-				}
-
-				// Parse the result
-				var resultData map[string]interface{}
-				if err := json.Unmarshal(resultBody, &resultData); err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse result"})
-					return
-				}
-
-				// Extract text from result
-				text := ""
-				if textValue, ok := resultData["text"]; ok {
-					text = fmt.Sprintf("%v", textValue)
-				} else if contentValue, ok := resultData["content"]; ok {
-					text = fmt.Sprintf("%v", contentValue)
-				} else {
-					// Return the whole result as text
-					text = string(resultBody)
-				}
-
-				// Return the extracted text
-				response := DocumentUploadResponse{
-					Text:     text,
-					Filename: header.Filename,
-					Size:     header.Size,
-				}
-
-				c.JSON(http.StatusOK, response)
-				return
-
-			case "failure":
-				errorMsg := "Document processing failed"
-				if status.Error != nil {
-					errorMsg = *status.Error
-				}
-				c.JSON(http.StatusInternalServerError, gin.H{"error": errorMsg})
-				return
-
-			case "pending", "started":
-				// Continue polling
-				continue
-
-			default:
-				log.Printf("Unknown status: %s", actualStatus)
-				continue
-			}
+		// Include document in response
+		response.Document = &DocumentUploadResponse{
+			Text: text,
+			// Note: We don't have filename and size here, frontend should store these
 		}
 	}
+
+	c.JSON(http.StatusOK, response)
 }
 
 func (s *TinfoilProxyServer) nonStreamingChatCompletion(c *gin.Context, req ChatCompletionRequest) {
@@ -763,6 +766,9 @@ func main() {
 
 	// Document upload endpoint
 	r.POST("/v1/documents/upload", server.uploadDocument)
+	
+	// Document status endpoint
+	r.GET("/v1/documents/status/:taskId", server.checkDocumentStatus)
 
 	// Start server
 	port := os.Getenv("TINFOIL_PROXY_PORT")

@@ -24,6 +24,29 @@ pub struct DocumentUploadResponse {
     pub size: i64,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct DocumentUploadInitResponse {
+    pub task_id: String,
+    pub filename: String,
+    pub size: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct DocumentStatusRequest {
+    pub task_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct DocumentStatusResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document: Option<DocumentUploadResponse>,
+}
+
 pub fn router(app_state: Arc<AppState>) -> Router<()> {
     Router::new()
         .route("/v1/documents/upload", post(upload_document))
@@ -31,6 +54,13 @@ pub fn router(app_state: Arc<AppState>) -> Router<()> {
             app_state.clone(),
             decrypt_request::<DocumentUploadRequest>,
         ))
+        .route(
+            "/v1/documents/status",
+            post(check_document_status).layer(axum::middleware::from_fn_with_state(
+                app_state.clone(),
+                decrypt_request::<DocumentStatusRequest>,
+            )),
+        )
         .with_state(app_state)
 }
 
@@ -40,7 +70,7 @@ async fn upload_document(
     axum::Extension(session_id): axum::Extension<Uuid>,
     axum::Extension(user): axum::Extension<User>,
     axum::Extension(body): axum::Extension<DocumentUploadRequest>,
-) -> Result<Json<EncryptedResponse<DocumentUploadResponse>>, ApiError> {
+) -> Result<Json<EncryptedResponse<DocumentUploadInitResponse>>, ApiError> {
     debug!("Entering upload_document function for user: {}", user.uuid);
 
     // Prevent guest users from using the document upload feature
@@ -136,23 +166,20 @@ async fn upload_document(
 
     debug!("Sending document to Tinfoil proxy");
 
-    // Send the request to Tinfoil proxy with 5 minute timeout
-    let res = timeout(
-        std::time::Duration::from_secs(300), // 5 minutes
-        client.request(req),
-    )
-    .await
-    .map_err(|_| {
-        error!("Request to Tinfoil proxy timed out after 5 minutes");
-        ApiError::InternalServerError
-    })?
-    .map_err(|e| {
-        error!("Failed to send request to Tinfoil proxy: {:?}", e);
-        ApiError::InternalServerError
-    })?;
+    // Send the request to Tinfoil proxy with 30 second timeout (just for initial submission)
+    let res = timeout(std::time::Duration::from_secs(30), client.request(req))
+        .await
+        .map_err(|_| {
+            error!("Request to Tinfoil proxy timed out");
+            ApiError::InternalServerError
+        })?
+        .map_err(|e| {
+            error!("Failed to send request to Tinfoil proxy: {:?}", e);
+            ApiError::InternalServerError
+        })?;
 
-    // Check if the response is successful
-    if !res.status().is_success() {
+    // Check if the response is successful (202 Accepted for async)
+    if res.status() != hyper::StatusCode::ACCEPTED && !res.status().is_success() {
         error!(
             "Tinfoil proxy returned non-success status: {}",
             res.status()
@@ -166,15 +193,96 @@ async fn upload_document(
         ApiError::InternalServerError
     })?;
 
-    // Parse the response
-    let upload_response: DocumentUploadResponse =
+    // Parse the response to get task ID
+    let init_response: DocumentUploadInitResponse =
         serde_json::from_slice(&body_bytes).map_err(|e| {
             error!("Failed to parse response: {:?}", e);
             ApiError::InternalServerError
         })?;
 
-    debug!("Document processed successfully");
+    debug!(
+        "Document upload initiated with task ID: {}",
+        init_response.task_id
+    );
 
     // Encrypt and return the response
-    encrypt_response(&state, &session_id, &upload_response).await
+    encrypt_response(&state, &session_id, &init_response).await
+}
+
+async fn check_document_status(
+    State(state): State<Arc<AppState>>,
+    _headers: HeaderMap,
+    axum::Extension(session_id): axum::Extension<Uuid>,
+    axum::Extension(user): axum::Extension<User>,
+    axum::Extension(body): axum::Extension<DocumentStatusRequest>,
+) -> Result<Json<EncryptedResponse<DocumentStatusResponse>>, ApiError> {
+    debug!("Checking document status for task: {}", body.task_id);
+
+    // Prevent guest users from using the document upload feature
+    if user.is_guest() {
+        error!(
+            "Guest user attempted to check document status: {}",
+            user.uuid
+        );
+        return Err(ApiError::Unauthorized);
+    }
+
+    // Get the Tinfoil API base URL from the proxy router
+    let tinfoil_api_base = state.proxy_router.get_tinfoil_base_url().ok_or_else(|| {
+        error!("Tinfoil API base not configured");
+        ApiError::InternalServerError
+    })?;
+
+    // Create a new hyper client
+    let https = HttpsConnector::new();
+    let client = Client::builder().build::<_, Body>(https);
+
+    // Prepare the request to check status
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "{}/v1/documents/status/{}",
+            tinfoil_api_base, body.task_id
+        ))
+        .body(Body::empty())
+        .map_err(|e| {
+            error!("Failed to create request: {:?}", e);
+            ApiError::InternalServerError
+        })?;
+
+    // Send the request with 10 second timeout
+    let res = timeout(std::time::Duration::from_secs(10), client.request(req))
+        .await
+        .map_err(|_| {
+            error!("Status check request timed out");
+            ApiError::InternalServerError
+        })?
+        .map_err(|e| {
+            error!("Failed to send status request: {:?}", e);
+            ApiError::InternalServerError
+        })?;
+
+    // Check if the response is successful
+    if !res.status().is_success() {
+        error!("Status check returned non-success status: {}", res.status());
+        return Err(ApiError::InternalServerError);
+    }
+
+    // Read the response body
+    let body_bytes = hyper::body::to_bytes(res.into_body()).await.map_err(|e| {
+        error!("Failed to read response body: {:?}", e);
+        ApiError::InternalServerError
+    })?;
+
+    // Parse the response
+    let status_response: DocumentStatusResponse =
+        serde_json::from_slice(&body_bytes).map_err(|e| {
+            error!("Failed to parse status response: {:?}", e);
+            ApiError::InternalServerError
+        })?;
+
+    debug!("Document status: {}", status_response.status);
+
+    // Encrypt and return the response
+    encrypt_response(&state, &session_id, &status_response).await
 }
