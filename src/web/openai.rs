@@ -148,7 +148,10 @@ async fn proxy_openai(
 
         // Forward relevant headers from the original request
         for (key, value) in headers.iter() {
-            if key != header::HOST && key != header::AUTHORIZATION && key != header::CONTENT_LENGTH
+            if key != header::HOST
+                && key != header::AUTHORIZATION
+                && key != header::CONTENT_LENGTH
+                && key != header::CONTENT_TYPE
             {
                 if let (Ok(name), Ok(val)) = (
                     HeaderName::from_bytes(key.as_ref()),
