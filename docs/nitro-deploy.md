@@ -1497,3 +1497,59 @@ Once CloudWatch is set up and the logging container is running, you can view you
 4. Clicking on the log stream (e.g., `enclave-logs-dev`) to view the logs.
 
 This setup allows you to monitor your Nitro Enclave's logs in real-time through the AWS CloudWatch console.
+
+## Disk Space Management
+
+Monitor disk space regularly to prevent service disruptions. A full disk can cause various issues including failed HTTP requests.
+
+### Check disk usage:
+```bash
+df -h
+du -sh /* 2>/dev/null | sort -rh | head -20
+```
+
+### Configure Docker log rotation:
+Docker container logs can grow very large. Configure log rotation to prevent disk space issues:
+
+```bash
+echo '{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "100m",
+    "max-file": "3"
+  }
+}' | sudo tee /etc/docker/daemon.json
+
+sudo systemctl restart docker
+```
+
+### Emergency cleanup commands:
+If disk is full, use these commands to free up space:
+
+```bash
+# Clear large Docker logs
+sudo find /var/lib/docker/containers -name "*-json.log" -size +100M -exec truncate -s 0 {} \;
+
+# Clear systemd journal logs
+sudo journalctl --vacuum-size=100M
+
+# Clear old logs
+sudo find /var/log -type f -name "*.log" -exec truncate -s 0 {} \;
+
+# Docker cleanup
+docker system prune -a -f
+docker volume prune -f
+
+# Clear tmp directories
+sudo rm -rf /tmp/*
+sudo rm -rf /var/tmp/*
+```
+
+### Regular maintenance:
+Set up a cron job for regular cleanup:
+
+```bash
+sudo crontab -e
+# Add this line for weekly cleanup:
+0 2 * * 0 journalctl --vacuum-size=100M && docker system prune -f
+```
