@@ -22,26 +22,32 @@ import (
 var modelConfigs = map[string]struct {
 	ModelID     string
 	Description string
-	Enclave     string
-	Repo        string
+	Active      bool
 }{
 	"deepseek-r1-70b": {
 		ModelID:     "deepseek-r1-70b",
-		Description: "High-performance reasoning model",
-		Enclave:     "deepseek-r1-70b-p.model.tinfoil.sh",
-		Repo:        "tinfoilsh/confidential-deepseek-r1-70b-prod",
+		Description: "Advanced reasoning and complex problem-solving model",
+		Active:      true,
+	},
+	"mistral-small-3-1-24b": {
+		ModelID:     "mistral-small-3-1-24b",
+		Description: "Vision capabilities for image analysis, efficient performance",
+		Active:      true,
 	},
 	"llama3-3-70b": {
 		ModelID:     "llama3-3-70b",
-		Description: "Multilingual model optimized for dialogue",
-		Enclave:     "llama3-3-70b.model.tinfoil.sh",
-		Repo:        "tinfoilsh/confidential-llama3-3-70b",
+		Description: "Multilingual understanding, dialogue optimization",
+		Active:      false,
+	},
+	"qwen2-5-72b": {
+		ModelID:     "qwen2-5-72b",
+		Description: "Exceptional function calling, multilingual capabilities",
+		Active:      true,
 	},
 	"nomic-embed-text": {
 		ModelID:     "nomic-embed-text",
 		Description: "Text embedding model",
-		Enclave:     "nomic-embed-text.model.tinfoil.sh",
-		Repo:        "tinfoilsh/confidential-nomic-embed-text",
+		Active:      false,
 	},
 }
 
@@ -56,8 +62,8 @@ var docUploadConfig = struct {
 
 // Request/Response models
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"`
 }
 
 type ChatCompletionRequest struct {
@@ -155,35 +161,32 @@ func NewTinfoilProxyServer() (*TinfoilProxyServer, error) {
 		clients: make(map[string]*tinfoil.Client),
 	}
 
-	// Temporarily only initialize deepseek model
-	modelsToInit := []string{"deepseek-r1-70b"} // Comment out to load all: all keys from modelConfigs
-
-	for _, modelName := range modelsToInit {
-		config, ok := modelConfigs[modelName]
-		if !ok {
-			log.Printf("Model %s not found in modelConfigs", modelName)
+	// Initialize Tinfoil client with new simplified API
+	log.Printf("Initializing Tinfoil client with new API")
+	
+	// Create a single client that will handle all models through the inference endpoint
+	client, err := tinfoil.NewClient(option.WithAPIKey(apiKey))
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize Tinfoil client: %v", err)
+	}
+	
+	// Register all active models
+	for modelName, config := range modelConfigs {
+		if !config.Active {
+			log.Printf("Skipping inactive model: %s", modelName)
 			continue
 		}
 
-		log.Printf("Initializing %s", modelName)
+		log.Printf("Registering model %s", modelName)
 		
-		client, err := tinfoil.NewClientWithParams(
-			config.Enclave,
-			config.Repo,
-			option.WithAPIKey(apiKey),
-		)
-		if err != nil {
-			log.Printf("Failed to initialize model %s: %v", modelName, err)
-			log.Printf("Skipping model %s due to initialization error", modelName)
-			continue
-		}
-		
+		// Use the same client for all models - the inference endpoint will route based on model name
 		server.clients[modelName] = client
-		log.Printf("Successfully initialized Tinfoil client for model: %s", modelName)
+		log.Printf("Successfully registered model: %s", modelName)
 	}
 
-	// Initialize document upload service separately
+	// Initialize document upload service
 	log.Printf("Initializing document upload service")
+	// Document upload still uses the specific enclave URL
 	docClient, err := tinfoil.NewClientWithParams(
 		docUploadConfig.Enclave,
 		docUploadConfig.Repo,
@@ -195,10 +198,8 @@ func NewTinfoilProxyServer() (*TinfoilProxyServer, error) {
 	} else {
 		server.docUploadClient = docClient
 		// Also create a SecureClient for HTTP requests
-		server.docUploadSecureClient = tinfoil.NewSecureClient(
-			docUploadConfig.Enclave,
-			docUploadConfig.Repo,
-		)
+		// Note: NewSecureClient now uses simplified API without parameters
+		server.docUploadSecureClient = tinfoil.NewSecureClient()
 		
 		// Verify the enclave
 		_, err = server.docUploadSecureClient.Verify()
@@ -227,6 +228,69 @@ func (s *TinfoilProxyServer) getClient(model string) (*tinfoil.Client, error) {
 	return client, nil
 }
 
+// convertToOpenAIMessage handles both string content and multimodal content arrays
+func convertToOpenAIMessage(msg ChatMessage, role string) openai.ChatCompletionMessageParamUnion {
+	// If content is a string, use the simple message constructors
+	if contentStr, ok := msg.Content.(string); ok {
+		switch role {
+		case "user":
+			return openai.UserMessage(contentStr)
+		case "assistant":
+			return openai.AssistantMessage(contentStr)
+		case "system":
+			return openai.SystemMessage(contentStr)
+		default:
+			return openai.UserMessage(contentStr)
+		}
+	}
+
+	// If content is an array, it's multimodal content
+	if contentArray, ok := msg.Content.([]interface{}); ok {
+		var parts []openai.ChatCompletionContentPartUnionParam
+		
+		for _, part := range contentArray {
+			if partMap, ok := part.(map[string]interface{}); ok {
+				if partType, exists := partMap["type"].(string); exists {
+					switch partType {
+					case "text":
+						if text, ok := partMap["text"].(string); ok {
+							parts = append(parts, openai.TextContentPart(text))
+						}
+					case "image_url":
+						if imageURLMap, ok := partMap["image_url"].(map[string]interface{}); ok {
+							if url, ok := imageURLMap["url"].(string); ok {
+								parts = append(parts, openai.ImageContentPart(
+									openai.ChatCompletionContentPartImageImageURLParam{
+										URL: url,
+									},
+								))
+							}
+						}
+					}
+				}
+			}
+		}
+		
+		// Only user messages support multimodal content in the OpenAI SDK
+		if role == "user" && len(parts) > 0 {
+			return openai.UserMessage(parts)
+		}
+	}
+	
+	// Fallback: stringify the content
+	contentJSON, _ := json.Marshal(msg.Content)
+	switch role {
+	case "user":
+		return openai.UserMessage(string(contentJSON))
+	case "assistant":
+		return openai.AssistantMessage(string(contentJSON))
+	case "system":
+		return openai.SystemMessage(string(contentJSON))
+	default:
+		return openai.UserMessage(string(contentJSON))
+	}
+}
+
 func (s *TinfoilProxyServer) streamChatCompletion(c *gin.Context, req ChatCompletionRequest) {
 	client, err := s.getClient(req.Model)
 	if err != nil {
@@ -239,13 +303,13 @@ func (s *TinfoilProxyServer) streamChatCompletion(c *gin.Context, req ChatComple
 	for i, msg := range req.Messages {
 		switch msg.Role {
 		case "user":
-			messages[i] = openai.UserMessage(msg.Content)
+			messages[i] = convertToOpenAIMessage(msg, "user")
 		case "assistant":
-			messages[i] = openai.AssistantMessage(msg.Content)
+			messages[i] = convertToOpenAIMessage(msg, "assistant")
 		case "system":
-			messages[i] = openai.SystemMessage(msg.Content)
+			messages[i] = convertToOpenAIMessage(msg, "system")
 		default:
-			messages[i] = openai.UserMessage(msg.Content)
+			messages[i] = convertToOpenAIMessage(msg, "user")
 		}
 	}
 
@@ -629,13 +693,13 @@ func (s *TinfoilProxyServer) nonStreamingChatCompletion(c *gin.Context, req Chat
 	for i, msg := range req.Messages {
 		switch msg.Role {
 		case "user":
-			messages[i] = openai.UserMessage(msg.Content)
+			messages[i] = convertToOpenAIMessage(msg, "user")
 		case "assistant":
-			messages[i] = openai.AssistantMessage(msg.Content)
+			messages[i] = convertToOpenAIMessage(msg, "assistant")
 		case "system":
-			messages[i] = openai.SystemMessage(msg.Content)
+			messages[i] = convertToOpenAIMessage(msg, "system")
 		default:
-			messages[i] = openai.UserMessage(msg.Content)
+			messages[i] = convertToOpenAIMessage(msg, "user")
 		}
 	}
 
