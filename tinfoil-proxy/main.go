@@ -22,18 +22,32 @@ import (
 var modelConfigs = map[string]struct {
 	ModelID     string
 	Description string
+	Active      bool
 }{
 	"deepseek-r1-70b": {
 		ModelID:     "deepseek-r1-70b",
-		Description: "High-performance reasoning model",
+		Description: "Advanced reasoning and complex problem-solving model",
+		Active:      true,
+	},
+	"mistral-small-3-1-24b": {
+		ModelID:     "mistral-small-3-1-24b",
+		Description: "Vision capabilities for image analysis, efficient performance",
+		Active:      true,
 	},
 	"llama3-3-70b": {
 		ModelID:     "llama3-3-70b",
-		Description: "Multilingual model optimized for dialogue",
+		Description: "Multilingual understanding, dialogue optimization",
+		Active:      false,
+	},
+	"qwen2-5-72b": {
+		ModelID:     "qwen2-5-72b",
+		Description: "Exceptional function calling, multilingual capabilities",
+		Active:      true,
 	},
 	"nomic-embed-text": {
 		ModelID:     "nomic-embed-text",
 		Description: "Text embedding model",
+		Active:      false,
 	},
 }
 
@@ -156,13 +170,10 @@ func NewTinfoilProxyServer() (*TinfoilProxyServer, error) {
 		return nil, fmt.Errorf("failed to initialize Tinfoil client: %v", err)
 	}
 	
-	// Temporarily only initialize deepseek model
-	modelsToInit := []string{"deepseek-r1-70b"} // Comment out to load all: all keys from modelConfigs
-
-	for _, modelName := range modelsToInit {
-		_, ok := modelConfigs[modelName]
-		if !ok {
-			log.Printf("Model %s not found in modelConfigs", modelName)
+	// Register all active models
+	for modelName, config := range modelConfigs {
+		if !config.Active {
+			log.Printf("Skipping inactive model: %s", modelName)
 			continue
 		}
 
