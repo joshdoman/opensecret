@@ -271,10 +271,12 @@ fi
 # Add Tinfoil proxy hostnames to /etc/hosts
 echo "127.0.0.16 api-github-proxy.tinfoil.sh" >> /etc/hosts
 echo "127.0.0.17 tuf-repo-cdn.sigstore.dev" >> /etc/hosts
+# DEPRECATED: Will be removed after full migration to inference.tinfoil.sh
 echo "127.0.0.18 deepseek-r1-70b-p.model.tinfoil.sh" >> /etc/hosts
 echo "127.0.0.19 kds-proxy.tinfoil.sh" >> /etc/hosts
 echo "127.0.0.20 gh-attestation-proxy.tinfoil.sh" >> /etc/hosts
 echo "127.0.0.21 doc-upload.model.tinfoil.sh" >> /etc/hosts
+echo "127.0.0.22 inference.tinfoil.sh" >> /etc/hosts
 log "Added Tinfoil proxy domains to /etc/hosts"
 
 touch /app/libnsm.so
@@ -353,6 +355,7 @@ python3 /app/traffic_forwarder.py 127.0.0.16 443 3 8019 &
 log "Starting TUF Repository CDN traffic forwarder"
 python3 /app/traffic_forwarder.py 127.0.0.17 443 3 8020 &
 
+# DEPRECATED: Will be removed after full migration to inference.tinfoil.sh
 log "Starting Tinfoil DeepSeek model traffic forwarder"
 python3 /app/traffic_forwarder.py 127.0.0.18 443 3 8021 &
 
@@ -364,6 +367,9 @@ python3 /app/traffic_forwarder.py 127.0.0.20 443 3 8023 &
 
 log "Starting Tinfoil Document Upload traffic forwarder"
 python3 /app/traffic_forwarder.py 127.0.0.21 443 3 8024 &
+
+log "Starting Tinfoil Inference traffic forwarder"
+python3 /app/traffic_forwarder.py 127.0.0.22 443 3 8025 &
 
 # Wait for the forwarders to start
 log "Waiting for forwarders to start"
@@ -492,6 +498,7 @@ else
     log "TUF Repository CDN connection failed"
 fi
 
+# DEPRECATED: Will be removed after full migration
 log "Testing connection to Tinfoil DeepSeek model:"
 if timeout 5 bash -c '</dev/tcp/127.0.0.18/443'; then
     log "Tinfoil DeepSeek model connection successful"
@@ -518,6 +525,13 @@ if timeout 5 bash -c '</dev/tcp/127.0.0.21/443'; then
     log "Tinfoil Document Upload connection successful"
 else
     log "Tinfoil Document Upload connection failed"
+fi
+
+log "Testing connection to Tinfoil Inference:"
+if timeout 5 bash -c '</dev/tcp/127.0.0.22/443'; then
+    log "Tinfoil Inference connection successful"
+else
+    log "Tinfoil Inference connection failed"
 fi
 
 # Start the continuum-proxy if we're in AWS Nitro mode

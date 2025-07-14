@@ -841,10 +841,11 @@ Add these lines:
 ```
 - {address: api-github-proxy.tinfoil.sh, port: 443}
 - {address: tuf-repo-cdn.sigstore.dev, port: 443}
-- {address: deepseek-r1-70b-p.model.tinfoil.sh, port: 443}
+- {address: deepseek-r1-70b-p.model.tinfoil.sh, port: 443}  # DEPRECATED: Will be removed after full migration to inference.tinfoil.sh
 - {address: doc-upload.model.tinfoil.sh, port: 443}
 - {address: kds-proxy.tinfoil.sh, port: 443}
 - {address: gh-attestation-proxy.tinfoil.sh, port: 443}
+- {address: inference.tinfoil.sh, port: 443}  # NEW: Unified inference endpoint for all models
 ```
 
 Restart the nitro vsock proxy service:
@@ -892,15 +893,16 @@ Restart=always
 WantedBy=multi-user.target
 ```
 
-#### Tinfoil DeepSeek Model
+#### Tinfoil DeepSeek Model (DEPRECATED - Use Tinfoil Inference service instead)
 ```sh
+# DEPRECATED: This service will be removed after full migration to the unified inference endpoint
 sudo vim /etc/systemd/system/vsock-tinfoil-deepseek.service
 ```
 
 Add the following content:
 ```
 [Unit]
-Description=Vsock Tinfoil DeepSeek Model Service
+Description=Vsock Tinfoil DeepSeek Model Service (DEPRECATED)
 After=network.target
 
 [Service]
@@ -972,6 +974,26 @@ Restart=always
 WantedBy=multi-user.target
 ```
 
+#### Tinfoil Inference
+```sh
+sudo vim /etc/systemd/system/vsock-tinfoil-inference.service
+```
+
+Add the following content:
+```
+[Unit]
+Description=Vsock Tinfoil Inference Service
+After=network.target
+
+[Service]
+User=root
+ExecStart=/usr/bin/vsock-proxy 8025 inference.tinfoil.sh 443
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
 Activate all the services:
 
 ```sh
@@ -994,6 +1016,9 @@ sudo systemctl status vsock-tinfoil-github-proxy.service
 sudo systemctl enable vsock-tinfoil-doc-upload.service
 sudo systemctl start vsock-tinfoil-doc-upload.service
 sudo systemctl status vsock-tinfoil-doc-upload.service
+sudo systemctl enable vsock-tinfoil-inference.service
+sudo systemctl start vsock-tinfoil-inference.service
+sudo systemctl status vsock-tinfoil-inference.service
 ```
 
 If you need to restart these services:
@@ -1004,6 +1029,7 @@ sudo systemctl restart vsock-tinfoil-deepseek.service
 sudo systemctl restart vsock-tinfoil-kds-proxy.service
 sudo systemctl restart vsock-tinfoil-github-proxy.service
 sudo systemctl restart vsock-tinfoil-doc-upload.service
+sudo systemctl restart vsock-tinfoil-inference.service
 ```
 
 ## KMS Key

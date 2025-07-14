@@ -22,26 +22,18 @@ import (
 var modelConfigs = map[string]struct {
 	ModelID     string
 	Description string
-	Enclave     string
-	Repo        string
 }{
 	"deepseek-r1-70b": {
 		ModelID:     "deepseek-r1-70b",
 		Description: "High-performance reasoning model",
-		Enclave:     "deepseek-r1-70b-p.model.tinfoil.sh",
-		Repo:        "tinfoilsh/confidential-deepseek-r1-70b-prod",
 	},
 	"llama3-3-70b": {
 		ModelID:     "llama3-3-70b",
 		Description: "Multilingual model optimized for dialogue",
-		Enclave:     "llama3-3-70b.model.tinfoil.sh",
-		Repo:        "tinfoilsh/confidential-llama3-3-70b",
 	},
 	"nomic-embed-text": {
 		ModelID:     "nomic-embed-text",
 		Description: "Text embedding model",
-		Enclave:     "nomic-embed-text.model.tinfoil.sh",
-		Repo:        "tinfoilsh/confidential-nomic-embed-text",
 	},
 }
 
@@ -155,35 +147,35 @@ func NewTinfoilProxyServer() (*TinfoilProxyServer, error) {
 		clients: make(map[string]*tinfoil.Client),
 	}
 
+	// Initialize Tinfoil client with new simplified API
+	log.Printf("Initializing Tinfoil client with new API")
+	
+	// Create a single client that will handle all models through the inference endpoint
+	client, err := tinfoil.NewClient(option.WithAPIKey(apiKey))
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize Tinfoil client: %v", err)
+	}
+	
 	// Temporarily only initialize deepseek model
 	modelsToInit := []string{"deepseek-r1-70b"} // Comment out to load all: all keys from modelConfigs
 
 	for _, modelName := range modelsToInit {
-		config, ok := modelConfigs[modelName]
+		_, ok := modelConfigs[modelName]
 		if !ok {
 			log.Printf("Model %s not found in modelConfigs", modelName)
 			continue
 		}
 
-		log.Printf("Initializing %s", modelName)
+		log.Printf("Registering model %s", modelName)
 		
-		client, err := tinfoil.NewClientWithParams(
-			config.Enclave,
-			config.Repo,
-			option.WithAPIKey(apiKey),
-		)
-		if err != nil {
-			log.Printf("Failed to initialize model %s: %v", modelName, err)
-			log.Printf("Skipping model %s due to initialization error", modelName)
-			continue
-		}
-		
+		// Use the same client for all models - the inference endpoint will route based on model name
 		server.clients[modelName] = client
-		log.Printf("Successfully initialized Tinfoil client for model: %s", modelName)
+		log.Printf("Successfully registered model: %s", modelName)
 	}
 
-	// Initialize document upload service separately
+	// Initialize document upload service
 	log.Printf("Initializing document upload service")
+	// Document upload still uses the specific enclave URL
 	docClient, err := tinfoil.NewClientWithParams(
 		docUploadConfig.Enclave,
 		docUploadConfig.Repo,
@@ -195,10 +187,8 @@ func NewTinfoilProxyServer() (*TinfoilProxyServer, error) {
 	} else {
 		server.docUploadClient = docClient
 		// Also create a SecureClient for HTTP requests
-		server.docUploadSecureClient = tinfoil.NewSecureClient(
-			docUploadConfig.Enclave,
-			docUploadConfig.Repo,
-		)
+		// Note: NewSecureClient now uses simplified API without parameters
+		server.docUploadSecureClient = tinfoil.NewSecureClient()
 		
 		// Verify the enclave
 		_, err = server.docUploadSecureClient.Verify()
