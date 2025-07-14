@@ -62,8 +62,8 @@ var docUploadConfig = struct {
 
 // Request/Response models
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"`
 }
 
 type ChatCompletionRequest struct {
@@ -228,6 +228,69 @@ func (s *TinfoilProxyServer) getClient(model string) (*tinfoil.Client, error) {
 	return client, nil
 }
 
+// convertToOpenAIMessage handles both string content and multimodal content arrays
+func convertToOpenAIMessage(msg ChatMessage, role string) openai.ChatCompletionMessageParamUnion {
+	// If content is a string, use the simple message constructors
+	if contentStr, ok := msg.Content.(string); ok {
+		switch role {
+		case "user":
+			return openai.UserMessage(contentStr)
+		case "assistant":
+			return openai.AssistantMessage(contentStr)
+		case "system":
+			return openai.SystemMessage(contentStr)
+		default:
+			return openai.UserMessage(contentStr)
+		}
+	}
+
+	// If content is an array, it's multimodal content
+	if contentArray, ok := msg.Content.([]interface{}); ok {
+		var parts []openai.ChatCompletionContentPartUnionParam
+		
+		for _, part := range contentArray {
+			if partMap, ok := part.(map[string]interface{}); ok {
+				if partType, exists := partMap["type"].(string); exists {
+					switch partType {
+					case "text":
+						if text, ok := partMap["text"].(string); ok {
+							parts = append(parts, openai.TextContentPart(text))
+						}
+					case "image_url":
+						if imageURLMap, ok := partMap["image_url"].(map[string]interface{}); ok {
+							if url, ok := imageURLMap["url"].(string); ok {
+								parts = append(parts, openai.ImageContentPart(
+									openai.ChatCompletionContentPartImageImageURLParam{
+										URL: url,
+									},
+								))
+							}
+						}
+					}
+				}
+			}
+		}
+		
+		// Only user messages support multimodal content in the OpenAI SDK
+		if role == "user" && len(parts) > 0 {
+			return openai.UserMessage(parts)
+		}
+	}
+	
+	// Fallback: stringify the content
+	contentJSON, _ := json.Marshal(msg.Content)
+	switch role {
+	case "user":
+		return openai.UserMessage(string(contentJSON))
+	case "assistant":
+		return openai.AssistantMessage(string(contentJSON))
+	case "system":
+		return openai.SystemMessage(string(contentJSON))
+	default:
+		return openai.UserMessage(string(contentJSON))
+	}
+}
+
 func (s *TinfoilProxyServer) streamChatCompletion(c *gin.Context, req ChatCompletionRequest) {
 	client, err := s.getClient(req.Model)
 	if err != nil {
@@ -240,13 +303,13 @@ func (s *TinfoilProxyServer) streamChatCompletion(c *gin.Context, req ChatComple
 	for i, msg := range req.Messages {
 		switch msg.Role {
 		case "user":
-			messages[i] = openai.UserMessage(msg.Content)
+			messages[i] = convertToOpenAIMessage(msg, "user")
 		case "assistant":
-			messages[i] = openai.AssistantMessage(msg.Content)
+			messages[i] = convertToOpenAIMessage(msg, "assistant")
 		case "system":
-			messages[i] = openai.SystemMessage(msg.Content)
+			messages[i] = convertToOpenAIMessage(msg, "system")
 		default:
-			messages[i] = openai.UserMessage(msg.Content)
+			messages[i] = convertToOpenAIMessage(msg, "user")
 		}
 	}
 
@@ -630,13 +693,13 @@ func (s *TinfoilProxyServer) nonStreamingChatCompletion(c *gin.Context, req Chat
 	for i, msg := range req.Messages {
 		switch msg.Role {
 		case "user":
-			messages[i] = openai.UserMessage(msg.Content)
+			messages[i] = convertToOpenAIMessage(msg, "user")
 		case "assistant":
-			messages[i] = openai.AssistantMessage(msg.Content)
+			messages[i] = convertToOpenAIMessage(msg, "assistant")
 		case "system":
-			messages[i] = openai.SystemMessage(msg.Content)
+			messages[i] = convertToOpenAIMessage(msg, "system")
 		default:
-			messages[i] = openai.UserMessage(msg.Content)
+			messages[i] = convertToOpenAIMessage(msg, "user")
 		}
 	}
 
