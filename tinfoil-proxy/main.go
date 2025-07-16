@@ -380,24 +380,43 @@ func (s *TinfoilProxyServer) streamChatCompletion(c *gin.Context, req ChatComple
 			Choices: make([]Choice, 0),
 		}
 
-		for _, choice := range chunk.Choices {
+		// Handle empty choices array - this appears to be Tinfoil's way of signaling end
+		if len(chunk.Choices) == 0 {
+			// Inject a proper final chunk with finish_reason
+			log.Printf("Empty choices array detected - injecting finish_reason: 'stop'")
+			finishReason := "stop"
 			choiceData := Choice{
-				Index: int(choice.Index),
+				Index: 0,
 				Delta: &ChatMessage{},
+				FinishReason: &finishReason,
 			}
-			
-			if choice.Delta.Role != "" {
-				choiceData.Delta.Role = string(choice.Delta.Role)
-			}
-			if choice.Delta.Content != "" {
-				choiceData.Delta.Content = choice.Delta.Content
-			}
-			if choice.FinishReason != "" {
-				finishReason := string(choice.FinishReason)
-				choiceData.FinishReason = &finishReason
-			}
-
 			chunkData.Choices = append(chunkData.Choices, choiceData)
+		} else {
+			for _, choice := range chunk.Choices {
+				choiceData := Choice{
+					Index: int(choice.Index),
+					Delta: &ChatMessage{},
+				}
+				
+				if choice.Delta.Role != "" {
+					choiceData.Delta.Role = string(choice.Delta.Role)
+				}
+				if choice.Delta.Content != "" {
+					choiceData.Delta.Content = choice.Delta.Content
+				} else if choice.Delta.Content == "" && choice.FinishReason == "" {
+					// Tinfoil sends empty content with no finish reason - interpret as end
+					log.Printf("Empty content with no finish_reason - setting finish_reason to 'stop'")
+					finishReason := "stop"
+					choiceData.FinishReason = &finishReason
+				}
+				
+				if choice.FinishReason != "" {
+					finishReason := string(choice.FinishReason)
+					choiceData.FinishReason = &finishReason
+				}
+
+				chunkData.Choices = append(chunkData.Choices, choiceData)
+			}
 		}
 
 		// Include usage data if available
