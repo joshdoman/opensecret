@@ -6,6 +6,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/openai/openai-go"
@@ -101,7 +104,10 @@ type ChatCompletionResponse struct {
 }
 
 type TinfoilProxyServer struct {
-	clients       map[string]*tinfoil.Client
+	client        *tinfoil.Client
+	clientMutex   sync.RWMutex
+	apiKey        string
+	lastRotation  time.Time
 }
 
 func NewTinfoilProxyServer() (*TinfoilProxyServer, error) {
@@ -111,7 +117,7 @@ func NewTinfoilProxyServer() (*TinfoilProxyServer, error) {
 	}
 
 	server := &TinfoilProxyServer{
-		clients: make(map[string]*tinfoil.Client),
+		apiKey: apiKey,
 	}
 
 	// Initialize Tinfoil client with new simplified API
@@ -123,33 +129,77 @@ func NewTinfoilProxyServer() (*TinfoilProxyServer, error) {
 		return nil, fmt.Errorf("failed to initialize Tinfoil client: %v", err)
 	}
 	
-	// Register all active models
-	for modelName, config := range modelConfigs {
-		if !config.Active {
-			log.Printf("Skipping inactive model: %s", modelName)
-			continue
-		}
-
-		log.Printf("Registering model %s", modelName)
-		
-		// Use the same client for all models - the inference endpoint will route based on model name
-		server.clients[modelName] = client
-		log.Printf("Successfully registered model: %s", modelName)
-	}
-
-	if len(server.clients) == 0 {
-		return nil, fmt.Errorf("no models could be initialized")
-	}
+	server.client = client
+	server.lastRotation = time.Now()
+	log.Printf("Successfully initialized Tinfoil client")
+	
+	// Start automatic client rotation every 10 minutes
+	go server.startAutoRotation()
 
 	return server, nil
 }
 
-func (s *TinfoilProxyServer) getClient(model string) (*tinfoil.Client, error) {
-	client, ok := s.clients[model]
-	if !ok {
-		return nil, fmt.Errorf("model '%s' not supported", model)
+func (s *TinfoilProxyServer) getClient() (*tinfoil.Client, error) {
+	s.clientMutex.RLock()
+	defer s.clientMutex.RUnlock()
+	
+	if s.client == nil {
+		return nil, fmt.Errorf("client not initialized")
 	}
-	return client, nil
+	return s.client, nil
+}
+
+// startAutoRotation rotates the client every 10 minutes
+func (s *TinfoilProxyServer) startAutoRotation() {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	
+	for range ticker.C {
+		log.Printf("Performing scheduled client rotation")
+		if err := s.reinitializeClient(); err != nil {
+			log.Printf("Failed to rotate client on schedule: %v", err)
+		}
+	}
+}
+
+// reinitializeClient creates a new client instance, typically called after certificate errors
+func (s *TinfoilProxyServer) reinitializeClient() error {
+	// Check if we recently rotated to avoid excessive reinitializations
+	s.clientMutex.RLock()
+	timeSinceLastRotation := time.Since(s.lastRotation)
+	s.clientMutex.RUnlock()
+	
+	if timeSinceLastRotation < 30*time.Second {
+		log.Printf("Skipping reinitialization - client was rotated %.0f seconds ago", timeSinceLastRotation.Seconds())
+		return nil
+	}
+	
+	log.Printf("Reinitializing Tinfoil client (last rotation: %.0f seconds ago)", timeSinceLastRotation.Seconds())
+	
+	client, err := tinfoil.NewClient(option.WithAPIKey(s.apiKey))
+	if err != nil {
+		return fmt.Errorf("failed to reinitialize Tinfoil client: %v", err)
+	}
+	
+	s.clientMutex.Lock()
+	s.client = client
+	s.lastRotation = time.Now()
+	s.clientMutex.Unlock()
+	
+	log.Printf("Successfully reinitialized Tinfoil client")
+	return nil
+}
+
+// isCertificateError checks if an error is related to certificate issues
+func isCertificateError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "certificate") || 
+	       strings.Contains(errStr, "fingerprint") ||
+	       strings.Contains(errStr, "x509") ||
+	       strings.Contains(errStr, "tls")
 }
 
 // convertToOpenAIMessage handles both string content and multimodal content arrays
@@ -216,7 +266,7 @@ func convertToOpenAIMessage(msg ChatMessage, role string) openai.ChatCompletionM
 }
 
 func (s *TinfoilProxyServer) streamChatCompletion(c *gin.Context, req ChatCompletionRequest) {
-	client, err := s.getClient(req.Model)
+	client, err := s.getClient()
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -367,7 +417,28 @@ func (s *TinfoilProxyServer) streamChatCompletion(c *gin.Context, req ChatComple
 
 	if err := stream.Err(); err != nil {
 		log.Printf("Stream error: %v", err)
-		// Don't send error details to client since they can't handle it properly
+		
+		// Check if this is a certificate error and reinitialize if needed
+		if isCertificateError(err) {
+			go func() {
+				if reinitErr := s.reinitializeClient(); reinitErr != nil {
+					log.Printf("Failed to reinitialize client: %v", reinitErr)
+				}
+			}()
+		}
+		
+		// Send error to client in OpenAI-compatible format
+		errorResponse := map[string]interface{}{
+			"error": map[string]interface{}{
+				"message": "Stream processing error",
+				"type":    "server_error",
+				"code":    "stream_error",
+			},
+		}
+		data, _ := json.Marshal(errorResponse)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+		return
 	}
 
 	fmt.Fprintf(w, "data: [DONE]\n\n")
@@ -375,7 +446,7 @@ func (s *TinfoilProxyServer) streamChatCompletion(c *gin.Context, req ChatComple
 }
 
 func (s *TinfoilProxyServer) nonStreamingChatCompletion(c *gin.Context, req ChatCompletionRequest) {
-	client, err := s.getClient(req.Model)
+	client, err := s.getClient()
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -487,13 +558,15 @@ func main() {
 	// List models endpoint
 	r.GET("/v1/models", func(c *gin.Context) {
 		models := []ModelInfo{}
-		for modelID := range server.clients {
-			models = append(models, ModelInfo{
-				ID:      modelID,
-				Object:  "model",
-				Created: 1700000000,
-				OwnedBy: "tinfoil",
-			})
+		for modelID, config := range modelConfigs {
+			if config.Active {
+				models = append(models, ModelInfo{
+					ID:      modelID,
+					Object:  "model",
+					Created: 1700000000,
+					OwnedBy: "tinfoil",
+				})
+			}
 		}
 		c.JSON(http.StatusOK, ModelsResponse{
 			Object: "list",
