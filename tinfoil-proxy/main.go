@@ -342,6 +342,9 @@ func (s *TinfoilProxyServer) streamChatCompletion(c *gin.Context, req ChatComple
 		return
 	}
 
+	// Track if we've already sent usage data for this stream
+	usageSent := false
+
 	for stream.Next() {
 		chunk := stream.Current()
 		
@@ -354,6 +357,9 @@ func (s *TinfoilProxyServer) streamChatCompletion(c *gin.Context, req ChatComple
 			Choices: make([]Choice, 0),
 		}
 
+		// Track if this chunk has a finish_reason
+		hasFinishReason := false
+		
 		// Handle empty choices array - this appears to be Tinfoil's way of signaling end
 		if len(chunk.Choices) == 0 {
 			// Inject a proper final chunk with finish_reason
@@ -365,6 +371,7 @@ func (s *TinfoilProxyServer) streamChatCompletion(c *gin.Context, req ChatComple
 				FinishReason: &finishReason,
 			}
 			chunkData.Choices = append(chunkData.Choices, choiceData)
+			hasFinishReason = true
 		} else {
 			for _, choice := range chunk.Choices {
 				choiceData := Choice{
@@ -382,28 +389,30 @@ func (s *TinfoilProxyServer) streamChatCompletion(c *gin.Context, req ChatComple
 					log.Printf("Empty content with no finish_reason - setting finish_reason to 'stop'")
 					finishReason := "stop"
 					choiceData.FinishReason = &finishReason
+					hasFinishReason = true
 				}
 				
 				if choice.FinishReason != "" {
 					finishReason := string(choice.FinishReason)
 					choiceData.FinishReason = &finishReason
+					hasFinishReason = true
 				}
 
 				chunkData.Choices = append(chunkData.Choices, choiceData)
 			}
 		}
 
-		// Include usage data if available
-		// Note: Usage is a struct, not a pointer in the OpenAI SDK
-		/* TODO fix
-		if chunk.Usage.TotalTokens > 0 {
+		// Include usage data only on final chunk (when we have a finish_reason AND completion tokens)
+		// This prevents sending usage data on intermediate chunks or chunks with only prompt tokens
+		// Also ensure we only send usage once per stream
+		if chunk.Usage.TotalTokens > 0 && chunk.Usage.CompletionTokens > 0 && hasFinishReason && !usageSent {
 			chunkData.Usage = &Usage{
 				PromptTokens:     int(chunk.Usage.PromptTokens),
 				CompletionTokens: int(chunk.Usage.CompletionTokens),
 				TotalTokens:      int(chunk.Usage.TotalTokens),
 			}
+			usageSent = true
 		}
-		*/
 
 		data, err := json.Marshal(chunkData)
 		if err != nil {
