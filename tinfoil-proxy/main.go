@@ -395,6 +395,7 @@ func (s *TinfoilProxyServer) streamChatCompletion(c *gin.Context, req ChatComple
 
 		// Include usage data if available
 		// Note: Usage is a struct, not a pointer in the OpenAI SDK
+		/* TODO fix
 		if chunk.Usage.TotalTokens > 0 {
 			chunkData.Usage = &Usage{
 				PromptTokens:     int(chunk.Usage.PromptTokens),
@@ -402,6 +403,7 @@ func (s *TinfoilProxyServer) streamChatCompletion(c *gin.Context, req ChatComple
 				TotalTokens:      int(chunk.Usage.TotalTokens),
 			}
 		}
+		*/
 
 		data, err := json.Marshal(chunkData)
 		if err != nil {
