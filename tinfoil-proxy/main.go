@@ -321,18 +321,54 @@ func (s *TinfoilProxyServer) streamChatCompletion(c *gin.Context, req ChatComple
 		}
 	}
 
+	// Create context for cancellation
+	ctx := c.Request.Context()
+
+	// Start streaming - but first check if we can create the stream without errors
+	stream := client.Chat.Completions.NewStreaming(ctx, params)
+	defer stream.Close()
+	
+	// Try to get the first chunk to detect early errors before sending SSE headers
+	if !stream.Next() {
+		if err := stream.Err(); err != nil {
+			log.Printf("Stream creation error: %v", err)
+			
+			// Check if this is a certificate error and reinitialize if needed
+			if isCertificateError(err) {
+				go func() {
+					if reinitErr := s.reinitializeClient(); reinitErr != nil {
+						log.Printf("Failed to reinitialize client: %v", reinitErr)
+					}
+				}()
+			}
+			
+			// Return proper HTTP error before SSE headers are sent
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": map[string]interface{}{
+					"message": "Failed to connect to upstream service",
+					"type":    "server_error",
+					"code":    "upstream_error",
+				},
+			})
+			return
+		}
+		// Stream ended without error but also without data
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": map[string]interface{}{
+				"message": "No response from upstream service",
+				"type":    "server_error",
+				"code":    "empty_stream",
+			},
+		})
+		return
+	}
+	
+	// We have at least one chunk, so we can proceed with SSE
 	// Set up SSE headers
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
 	c.Header("X-Accel-Buffering", "no")
-
-	// Create context for cancellation
-	ctx := c.Request.Context()
-
-	// Start streaming
-	stream := client.Chat.Completions.NewStreaming(ctx, params)
-	defer stream.Close()
 	
 	// Stream responses
 	w := c.Writer
@@ -344,8 +380,14 @@ func (s *TinfoilProxyServer) streamChatCompletion(c *gin.Context, req ChatComple
 
 	// Track if we've already sent usage data for this stream
 	usageSent := false
+	
+	// Process the first chunk we already read
+	firstChunk := true
 
-	for stream.Next() {
+	for firstChunk || stream.Next() {
+		if firstChunk {
+			firstChunk = false
+		}
 		chunk := stream.Current()
 		
 		// Convert to OpenAI-compatible format
