@@ -27,6 +27,11 @@ var modelConfigs = map[string]struct {
 		Description: "Advanced reasoning and complex problem-solving model",
 		Active:      true,
 	},
+	"deepseek-r1-0528": {
+		ModelID:     "deepseek-r1-0528",
+		Description: "Advanced reasoning and complex problem-solving model",
+		Active:      true,
+	},
 	"mistral-small-3-1-24b": {
 		ModelID:     "mistral-small-3-1-24b",
 		Description: "Vision capabilities for image analysis, efficient performance",
