@@ -1691,12 +1691,17 @@ impl DBConnection for PostgresConnection {
 pub(crate) fn setup_db(url: String) -> Arc<dyn DBConnection + Send + Sync> {
     info!("Connecting to database...");
     let manager = ConnectionManager::<PgConnection>::new(url);
-    // TODO make pool size bigger, just for testing connection issues
+
     let pool = Pool::builder()
-        .max_size(1) // should be a multiple of 100, our database connection limit
+        .max_size(20) // Increased from 1 to support concurrent operations
+        .min_idle(Some(5)) // Keep 5 connections ready for faster response
+        .connection_timeout(std::time::Duration::from_secs(30))
+        .idle_timeout(Some(std::time::Duration::from_secs(600))) // 10 minutes
+        .max_lifetime(Some(std::time::Duration::from_secs(1800))) // 30 minutes
         .test_on_check_out(true)
         .build(manager)
         .expect("Unable to build DB connection pool");
-    info!("Connected to database");
+
+    info!("Connected to database with pool size: 20, min idle: 5");
     Arc::new(PostgresConnection { db: pool })
 }

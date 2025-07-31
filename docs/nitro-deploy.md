@@ -317,7 +317,7 @@ After=network.target
 
 [Service]
 User=root
-ExecStart=/usr/bin/vsock-proxy 8001 [YOUR-DB-ENDPOINT].us-east-2.aws.neon.tech 5432
+ExecStart=/usr/bin/vsock-proxy --num_workers 30 8001 [YOUR-DB-ENDPOINT].us-east-2.aws.neon.tech 5432
 Restart=always
 
 [Install]
@@ -337,6 +337,8 @@ A restart of this should not be needed but if you need to
 ```
 sudo systemctl restart vsock-db-proxy.service
 ```
+
+Note: The vsock-proxy is configured with 30 workers to match the application's database connection pool size of 20, providing some headroom for concurrent connections.
 
 ## Vsock GitHub OAuth proxy
 Create a vsock proxy service so that enclave program can talk to GitHub:
