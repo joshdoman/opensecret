@@ -5,7 +5,10 @@ use backoff::{exponential::ExponentialBackoff, future::retry, Error as BackoffEr
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 use uuid::Uuid;
@@ -20,6 +23,7 @@ pub struct SqsEventPublisher {
     queue_url: String,
     aws_credential_manager: Arc<RwLock<Option<AwsCredentialManager>>>,
     region: String,
+    client_pool: Arc<RwLock<Option<(SqsClient, Instant)>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,23 +57,52 @@ impl SqsEventPublisher {
             queue_url,
             aws_credential_manager,
             region,
+            client_pool: Arc::new(RwLock::new(None)),
         }
     }
 
-    async fn create_client(&self) -> Result<SqsClient, SqsError> {
+    async fn get_or_create_client(&self) -> Result<SqsClient, SqsError> {
+        const CLIENT_MAX_AGE: Duration = Duration::from_secs(5 * 60 * 60); // 5 hours
+
+        // Check if we have a valid cached client
+        {
+            let pool = self.client_pool.read().await;
+            if let Some((client, created_at)) = &*pool {
+                if created_at.elapsed() < CLIENT_MAX_AGE {
+                    debug!("Reusing existing SQS client");
+                    return Ok(client.clone());
+                }
+                debug!("SQS client expired, creating new one");
+            }
+        }
+
+        // Need to create a new client
+        let mut pool = self.client_pool.write().await;
+
+        // Double-check in case another thread already created one
+        if let Some((client, created_at)) = &*pool {
+            if created_at.elapsed() < CLIENT_MAX_AGE {
+                return Ok(client.clone());
+            }
+        }
+
+        info!("Creating new SQS client");
+
         let creds = if let Some(manager) = self.aws_credential_manager.read().await.as_ref() {
+            // Fetch fresh credentials when creating new client
             manager
-                .get_credentials()
+                .fetch_credentials()
                 .await
-                .ok_or(SqsError::NoCredentials)?
+                .map_err(|_| SqsError::NoCredentials)?
         } else {
             debug!("Using default AWS credential chain");
-            return Ok(SqsClient::new(
-                &aws_config::defaults(aws_config::BehaviorVersion::latest())
-                    .region(aws_types::region::Region::new(self.region.clone()))
-                    .load()
-                    .await,
-            ));
+            let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                .region(aws_types::region::Region::new(self.region.clone()))
+                .load()
+                .await;
+            let client = SqsClient::new(&config);
+            *pool = Some((client.clone(), Instant::now()));
+            return Ok(client);
         };
 
         let aws_creds = Credentials::new(
@@ -86,7 +119,11 @@ impl SqsEventPublisher {
             .load()
             .await;
 
-        Ok(SqsClient::new(&config))
+        let client = SqsClient::new(&config);
+        *pool = Some((client.clone(), Instant::now()));
+
+        info!("Created new SQS client with fresh credentials");
+        Ok(client)
     }
 
     pub async fn publish_event(&self, event: UsageEvent) -> Result<(), SqsError> {
@@ -104,7 +141,7 @@ impl SqsEventPublisher {
         };
 
         let result = retry(backoff, || async {
-            let client = match self.create_client().await {
+            let client = match self.get_or_create_client().await {
                 Ok(client) => client,
                 Err(e) => return Err(BackoffError::transient(e)),
             };
