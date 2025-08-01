@@ -618,6 +618,10 @@ view-console-logs-dev:
 view-console-logs-prod:
     ssh -i $PROD_SSH_KEY $PROD_SERVER "export ENCLAVE_ID=$(nitro-cli describe-enclaves | jq -r '.[0].EnclaveID') && nitro-cli console --enclave-id $ENCLAVE_ID"
 
+# SSH into prod server with a custom command
+ssh-prod CMD:
+    ssh -i $PROD_SSH_KEY $PROD_SERVER {{quote(CMD)}}
+
 # View console logs in debug mode (preview)
 view-console-logs-preview:
     ssh -i $PREVIEW_SSH_KEY $PREVIEW_SERVER "export ENCLAVE_ID=$(nitro-cli describe-enclaves | jq -r '.[0].EnclaveID') && nitro-cli console --enclave-id $ENCLAVE_ID"
