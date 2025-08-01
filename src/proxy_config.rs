@@ -103,6 +103,10 @@ pub struct ProxyRouter {
 }
 
 impl ProxyRouter {
+    /// Get the default proxy configuration (for health checks)
+    pub fn get_default_proxy(&self) -> ProxyConfig {
+        self.default_proxy.clone()
+    }
     /// Get the provider-specific model name for a given canonical model
     pub fn get_model_name_for_provider(
         &self,

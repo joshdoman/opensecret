@@ -17,7 +17,8 @@ use crate::models::platform_users::PlatformUser;
 use crate::sqs::SqsEventPublisher;
 use crate::web::platform_login_routes;
 use crate::web::{
-    document_routes, health_routes, login_routes, oauth_routes, openai_routes, protected_routes,
+    document_routes, health_routes_with_state, login_routes, oauth_routes, openai_routes,
+    protected_routes,
 };
 use crate::{attestation_routes::SessionState, web::platform_routes};
 
@@ -2411,7 +2412,7 @@ async fn main() -> Result<(), Error> {
 
     let app = protected_routes(app_state.clone())
         .route_layer(from_fn_with_state(app_state.clone(), validate_jwt))
-        .merge(health_routes())
+        .merge(health_routes_with_state(app_state.clone()))
         .merge(login_routes(app_state.clone()))
         .merge(
             openai_routes(app_state.clone())
