@@ -52,6 +52,11 @@ var modelConfigs = map[string]struct {
 		Description: "Text embedding model",
 		Active:      false,
 	},
+	"gpt-oss-120b": {
+		ModelID:     "gpt-oss-120b",
+		Description: "Powerful reasoning, configurable reasoning effort levels, full chain-of-thought access, native agentic abilities",
+		Active:      true,
+	},
 }
 
 // Request/Response models
