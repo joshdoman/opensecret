@@ -215,7 +215,7 @@ if [ -z "$decoded_db_url" ]; then
 fi
 
 # Extract the hostname from the decoded DATABASE_URL and add it to /etc/hosts
-DB_HOSTNAME=$(echo "$decoded_db_url" | sed -n 's/.*@\(.*\)\/.*/\1/p')
+DB_HOSTNAME=$(echo "$decoded_db_url" | sed -n 's/.*@\([^/]*\).*/\1/p')
 if [ -z "$DB_HOSTNAME" ]; then
     log "Error: Failed to extract DB_HOSTNAME from decoded URL"
     exit 1
