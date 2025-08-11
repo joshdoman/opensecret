@@ -22,11 +22,6 @@ var modelConfigs = map[string]struct {
 	Description string
 	Active      bool
 }{
-	"deepseek-r1-70b": {
-		ModelID:     "deepseek-r1-70b",
-		Description: "Advanced reasoning and complex problem-solving model",
-		Active:      true,
-	},
 	"deepseek-r1-0528": {
 		ModelID:     "deepseek-r1-0528",
 		Description: "Advanced reasoning and complex problem-solving model",
