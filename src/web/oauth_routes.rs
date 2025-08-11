@@ -893,22 +893,29 @@ pub async fn oauth_callback(
 
                 let user = app_state.db.get_user_by_uuid(connection.user_id)?;
 
-                // Update the connection with the new token
-                // For Apple web flow, use the refresh token if available, otherwise empty string
-                let token_to_store = token
-                    .refresh_token()
-                    .map(|rt| rt.secret().to_string())
-                    .unwrap_or_else(|| "".to_string());
+                // CRITICAL: Verify user belongs to the current project
+                if user.project_id != project.id {
+                    debug!("User found but belongs to different project");
+                    // Treat as if no connection exists for this project
+                    None
+                } else {
+                    // Update the connection with the new token
+                    // For Apple web flow, use the refresh token if available, otherwise empty string
+                    let token_to_store = token
+                        .refresh_token()
+                        .map(|rt| rt.secret().to_string())
+                        .unwrap_or_else(|| "".to_string());
 
-                update_provider_connection(
-                    &app_state,
-                    &user,
-                    apple_db_provider.id,
-                    &token_to_store,
-                )
-                .await?;
+                    update_provider_connection(
+                        &app_state,
+                        &user,
+                        apple_db_provider.id,
+                        &token_to_store,
+                    )
+                    .await?;
 
-                Some(user)
+                    Some(user)
+                }
             } else {
                 // No existing connection found
                 debug!("No existing connection found for Apple ID: {}", sub);
@@ -1370,32 +1377,40 @@ pub async fn handle_apple_native_signin(
 
         let user = app_state.db.get_user_by_uuid(connection.user_id)?;
 
-        // Update the connection with an empty string instead of storing the ID token
-        update_provider_connection(&app_state, &user, apple_provider.id, &access_token).await?;
+        // CRITICAL: Verify user belongs to the current project
+        if user.project_id != project.id {
+            debug!("User found but belongs to different project, treating as new user");
+            // Fall through to create new user for this project
+        } else {
+            // Update the connection with an empty string instead of storing the ID token
+            update_provider_connection(&app_state, &user, apple_provider.id, &access_token).await?;
 
-        // Generate JWT tokens
-        let access_token = NewToken::new(&user, TokenType::Access, &app_state).map_err(|e| {
-            error!("Failed to generate access token: {:?}", e);
-            ApiError::InternalServerError
-        })?;
+            // Generate JWT tokens
+            let access_token =
+                NewToken::new(&user, TokenType::Access, &app_state).map_err(|e| {
+                    error!("Failed to generate access token: {:?}", e);
+                    ApiError::InternalServerError
+                })?;
 
-        let refresh_token = NewToken::new(&user, TokenType::Refresh, &app_state).map_err(|e| {
-            error!("Failed to generate refresh token: {:?}", e);
-            ApiError::InternalServerError
-        })?;
+            let refresh_token =
+                NewToken::new(&user, TokenType::Refresh, &app_state).map_err(|e| {
+                    error!("Failed to generate refresh token: {:?}", e);
+                    ApiError::InternalServerError
+                })?;
 
-        let auth_response = OAuthCallbackResponse {
-            id: user.get_id(),
-            email: user
-                .get_email()
-                .expect("OAuth user must have email")
-                .to_string(),
-            access_token: access_token.token,
-            refresh_token: refresh_token.token,
-        };
+            let auth_response = OAuthCallbackResponse {
+                id: user.get_id(),
+                email: user
+                    .get_email()
+                    .expect("OAuth user must have email")
+                    .to_string(),
+                access_token: access_token.token,
+                refresh_token: refresh_token.token,
+            };
 
-        debug!("Apple sign-in successful for existing user");
-        return encrypt_response(&app_state, &session_id, &auth_response).await;
+            debug!("Apple sign-in successful for existing user");
+            return encrypt_response(&app_state, &session_id, &auth_response).await;
+        }
     }
 
     // If we get here, user doesn't exist - need to create new user
