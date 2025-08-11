@@ -182,6 +182,12 @@ pub async fn send_verification_email(
             EmailError::UnknownError
         })?;
 
+    // Get organization name for the team signature
+    let org = app_state.db.get_org_by_id(project.org_id).map_err(|e| {
+        error!("Failed to get organization: {}", e);
+        EmailError::UnknownError
+    })?;
+
     let email_settings = app_state
         .db
         .get_project_email_settings(project_id)?
@@ -223,7 +229,7 @@ pub async fn send_verification_email(
                 <p class="code">{}</p>
                 <p>This verification link and code will expire in 24 hours.</p>
                 <p>If you didn't create an account with {}, please ignore this email.</p>
-                <p>Best regards,<br>The OpenSecret Team</p>
+                <p>Best regards,<br>The {} Team</p>
             </div>
         </body>
         </html>
@@ -233,7 +239,8 @@ pub async fn send_verification_email(
         verification_url,
         verification_url,
         verification_code,
-        project.name
+        project.name,
+        org.name
     );
 
     let email = CreateEmailBaseOptions::new(from_email, to, subject).with_html(&html_content);
@@ -267,6 +274,12 @@ pub async fn send_password_reset_email(
             EmailError::UnknownError
         })?;
 
+    // Get organization name for the team signature
+    let org = app_state.db.get_org_by_id(project.org_id).map_err(|e| {
+        error!("Failed to get organization: {}", e);
+        EmailError::UnknownError
+    })?;
+
     let to = [to_email];
     let subject = format!("Reset Your {} Password", project.name);
 
@@ -293,12 +306,12 @@ pub async fn send_password_reset_email(
                 <p class="code">{}</p>
                 <p>This code will expire in 24 hours.</p>
                 <p>If you have any issues, please contact our support team.</p>
-                <p>Best regards,<br>The OpenSecret Team</p>
+                <p>Best regards,<br>The {} Team</p>
             </div>
         </body>
         </html>
         "#,
-        project.name, project.name, project.name, alphanumeric_code
+        project.name, project.name, project.name, alphanumeric_code, org.name
     );
 
     let email = CreateEmailBaseOptions::new(from_email, to, subject).with_html(&html_content);
@@ -331,6 +344,12 @@ pub async fn send_password_reset_confirmation_email(
             EmailError::UnknownError
         })?;
 
+    // Get organization name for the team signature
+    let org = app_state.db.get_org_by_id(project.org_id).map_err(|e| {
+        error!("Failed to get organization: {}", e);
+        EmailError::UnknownError
+    })?;
+
     let to = [to_email];
     let subject = format!("Your {} Password Has Been Reset", project.name);
 
@@ -359,12 +378,12 @@ pub async fn send_password_reset_confirmation_email(
                     <li>Review your account activity for any suspicious actions.</li>
                 </ul>
                 <p>If you have any questions or concerns, please don't hesitate to reach out to our support team.</p>
-                <p>Best regards,<br>The OpenSecret Team</p>
+                <p>Best regards,<br>The {} Team</p>
             </div>
         </body>
         </html>
         "#,
-        project.name
+        project.name, org.name
     );
 
     let email = CreateEmailBaseOptions::new(from_email, to, subject).with_html(&html_content);
@@ -700,6 +719,12 @@ pub async fn send_account_deletion_email(
             EmailError::UnknownError
         })?;
 
+    // Get organization name for the team signature
+    let org = app_state.db.get_org_by_id(project.org_id).map_err(|e| {
+        error!("Failed to get organization: {}", e);
+        EmailError::UnknownError
+    })?;
+
     let to = [to_email];
     let subject = format!("Account Deletion Request for Your {} Account", project.name);
 
@@ -727,12 +752,12 @@ pub async fn send_account_deletion_email(
                 <p class="code">{}</p>
                 <p>This confirmation code will expire in 24 hours.</p>
                 <p>If you did not request this account deletion, please ignore this email, and your account will remain active. If you have any concerns about account security, please contact our support team.</p>
-                <p>Best regards,<br>The OpenSecret Team</p>
+                <p>Best regards,<br>The {} Team</p>
             </div>
         </body>
         </html>
         "#,
-        project.name, confirmation_code
+        project.name, confirmation_code, org.name
     );
 
     let email = CreateEmailBaseOptions::new(from_email, to, subject).with_html(&html_content);
@@ -765,6 +790,12 @@ pub async fn send_account_deletion_confirmation_email(
             EmailError::UnknownError
         })?;
 
+    // Get organization name for the team signature
+    let org = app_state.db.get_org_by_id(project.org_id).map_err(|e| {
+        error!("Failed to get organization: {}", e);
+        EmailError::UnknownError
+    })?;
+
     let to = [to_email];
     let subject = format!("Your {} Account Has Been Deleted", project.name);
 
@@ -788,12 +819,12 @@ pub async fn send_account_deletion_confirmation_email(
                 <p>Your {} account has been successfully deleted along with all associated data.</p>
                 <p>If you did not request this account deletion, please contact us immediately at <a href="mailto:support@opensecret.cloud">support@opensecret.cloud</a>.</p>
                 <p>Thank you for your time with us. We hope to see you again in the future.</p>
-                <p>Best regards,<br>The OpenSecret Team</p>
+                <p>Best regards,<br>The {} Team</p>
             </div>
         </body>
         </html>
         "#,
-        project.name
+        project.name, org.name
     );
 
     let email = CreateEmailBaseOptions::new(from_email, to, subject).with_html(&html_content);
