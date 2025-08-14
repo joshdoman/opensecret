@@ -1,59 +1,33 @@
-use crate::encrypt::encrypt_key_deterministic;
-use crate::encrypt::generate_random;
-use crate::encrypt::{
-    decrypt_with_key, decrypt_with_kms, encrypt_with_key, CustomRng, GenKeyResult,
-};
+use crate::encrypt::{CustomRng, GenKeyResult};
 use crate::web::{
     health_routes_with_state,
 };
-use crate::{attestation_routes::SessionState};
 
 use crate::{
     aws_credentials::AwsCredentialError,
-    private_key::{decrypt_user_seed_to_key, generate_twelve_word_seed},
 };
 use crate::{encrypt::create_new_encryption_key};
 use aws_credentials::{AwsCredentialManager, AwsCredentials};
-use axum::{http::StatusCode, middleware::from_fn_with_state, response::IntoResponse, Json};
-use base64::engine::general_purpose;
-use base64::Engine as _;
-use chacha20poly1305::aead::Aead;
-use chacha20poly1305::KeyInit;
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use axum::{http::StatusCode, response::IntoResponse, Json};
 use rand_core::{CryptoRng, RngCore};
-use secp256k1::SecretKey;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::env;
 use std::fmt;
-use std::io::{Read, Write};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use subtle::ConstantTimeEq;
-use tokio::spawn;
 use tokio::sync::RwLock;
 use tokio::task::{self};
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{error};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-use url::Url;
-use uuid::Uuid;
-use vsock::{VsockAddr, VsockStream};
+// use vsock::{VsockAddr, VsockStream};
 use web::attestation_routes;
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
 mod aws_credentials;
 mod encrypt;
-mod jwt;
-mod message_signing;
-mod private_key;
 mod web;
-
-const ENCLAVE_KEY_NAME: &str = "enclave_key";
-const JWT_SECRET_KEY_NAME: &str = "jwt_secret";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EnclaveRequest {
@@ -150,9 +124,6 @@ pub enum Error {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
-    #[error("Invalid JWT")]
-    InvalidJwt,
-
     #[error("Internal server error")]
     InternalServerError,
 
@@ -175,7 +146,6 @@ pub enum ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let status = match self {
-            ApiError::InvalidJwt => StatusCode::UNAUTHORIZED,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::InternalServerError => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::BadRequest => StatusCode::BAD_REQUEST,
@@ -210,13 +180,6 @@ pub struct TokenClaims {
     pub iat: i64,
     // Audience
     pub aud: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct Config {
-    jwt_keys: jwt::JwtKeys,
-    access_token_maxage: i64,
-    refresh_token_maxage: i64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -276,7 +239,6 @@ impl FromStr for AppMode {
 #[derive(Clone)]
 pub struct AppState {
     app_mode: AppMode,
-    config: Config,
     aws_credential_manager: Arc<tokio::sync::RwLock<Option<AwsCredentialManager>>>,
     enclave_key: Vec<u8>,
     ephemeral_keys: Arc<RwLock<HashMap<String, EphemeralSecret>>>,
@@ -287,7 +249,6 @@ pub struct AppStateBuilder {
     app_mode: Option<AppMode>,
     enclave_key: Option<Vec<u8>>,
     aws_credential_manager: Option<Arc<tokio::sync::RwLock<Option<AwsCredentialManager>>>>,
-    jwt_secret: Option<Vec<u8>>,
 }
 
 impl AppStateBuilder {
@@ -309,11 +270,6 @@ impl AppStateBuilder {
         self
     }
 
-    pub fn jwt_secret(mut self, jwt_secret: Vec<u8>) -> Self {
-        self.jwt_secret = Some(jwt_secret);
-        self
-    }
-
     pub async fn build(self) -> Result<AppState, Error> {
         let app_mode = self
             .app_mode
@@ -324,25 +280,9 @@ impl AppStateBuilder {
         let aws_credential_manager = self.aws_credential_manager.ok_or(Error::BuilderError(
             "aws_credential_manager is required".to_string(),
         ))?;
-        let jwt_secret = self
-            .jwt_secret
-            .ok_or(Error::BuilderError("jwt_secret is required".to_string()))?;
-
-        let config = Config {
-            jwt_keys: jwt::JwtKeys::new(jwt_secret)?,
-            access_token_maxage: 60,  // 60 minutes
-            refresh_token_maxage: 30, // 30 days
-        };
-
-        // Log the public key in hex format
-        tracing::info!(
-            "JWT ES256K public key (hex): {}",
-            hex::encode(config.jwt_keys.public_key().serialize())
-        );
 
         Ok(AppState {
             app_mode,
-            config,
             aws_credential_manager,
             enclave_key,
             ephemeral_keys: Arc::new(RwLock::new(HashMap::new())),
@@ -390,38 +330,38 @@ impl AppState {
     }
 }
 
-async fn get_secret(key_name: &str) -> Result<String, Error> {
-    let cid = 3;
-    let port = 8003;
+// async fn get_secret(key_name: &str) -> Result<String, Error> {
+//     let cid = 3;
+//     let port = 8003;
 
-    let sock_addr = VsockAddr::new(cid, port);
-    let mut stream = VsockStream::connect(&sock_addr)?;
+//     let sock_addr = VsockAddr::new(cid, port);
+//     let mut stream = VsockStream::connect(&sock_addr)?;
 
-    let request = EnclaveRequest {
-        request_type: "SecretsManager".to_string(),
-        key_name: Some(key_name.to_string()),
-    };
-    let request_json = serde_json::to_string(&request)?;
-    stream.write_all(request_json.as_bytes())?;
+//     let request = EnclaveRequest {
+//         request_type: "SecretsManager".to_string(),
+//         key_name: Some(key_name.to_string()),
+//     };
+//     let request_json = serde_json::to_string(&request)?;
+//     stream.write_all(request_json.as_bytes())?;
 
-    let mut response = String::new();
-    stream.read_to_string(&mut response)?;
+//     let mut response = String::new();
+//     stream.read_to_string(&mut response)?;
 
-    let parent_response: ParentResponse = serde_json::from_str(&response)?;
-    if parent_response.response_type == "secret" {
-        let secret_json: Value =
-            serde_json::from_str(parent_response.response_value.as_str().unwrap())?;
+//     let parent_response: ParentResponse = serde_json::from_str(&response)?;
+//     if parent_response.response_type == "secret" {
+//         let secret_json: Value =
+//             serde_json::from_str(parent_response.response_value.as_str().unwrap())?;
 
-        // Assuming the secret is always a JSON object with a single key-value pair
-        if let Some((_, value)) = secret_json.as_object().and_then(|obj| obj.iter().next()) {
-            Ok(value.as_str().unwrap_or_default().to_string())
-        } else {
-            Err(Error::SecretParsingError)
-        }
-    } else {
-        Err(Error::AuthenticationError)
-    }
-}
+//         // Assuming the secret is always a JSON object with a single key-value pair
+//         if let Some((_, value)) = secret_json.as_object().and_then(|obj| obj.iter().next()) {
+//             Ok(value.as_str().unwrap_or_default().to_string())
+//         } else {
+//             Err(Error::SecretParsingError)
+//         }
+//     } else {
+//         Err(Error::AuthenticationError)
+//     }
+// }
 
 async fn get_or_create_enclave_key(
     app_mode: &AppMode,
@@ -456,36 +396,6 @@ async fn get_or_create_enclave_key(
     // }
 
     Ok(key_res)
-}
-
-async fn get_or_create_jwt_secret(
-    app_mode: &AppMode,
-    aws_credential_manager: Arc<tokio::sync::RwLock<Option<AwsCredentialManager>>>,
-    enclave_key: &[u8],
-) -> Result<Vec<u8>, Error> {
-    match app_mode {
-        AppMode::Local => {
-            // For local mode, use environment variable
-            Ok(std::env::var("JWT_SECRET")
-                .expect("JWT_SECRET must be set in local mode")
-                .into_bytes())
-        }
-        _ => {
-            // Generate new JWT secret
-            let jwt_secret = jwt::generate_jwt_secret(aws_credential_manager.clone()).await?;
-
-            // Encrypt and store the new JWT secret
-            let secret_key = SecretKey::from_slice(enclave_key)
-                .map_err(|e| Error::EncryptionError(e.to_string()))?;
-            let encrypted_jwt_secret = encrypt_with_key(&secret_key, &jwt_secret).await;
-
-            // let new_secret =
-            //     NewEnclaveSecret::new(JWT_SECRET_KEY_NAME.to_string(), encrypted_jwt_secret);
-            // db.create_enclave_secret(new_secret)?;
-
-            Ok(jwt_secret)
-        }
-    }
 }
 
 fn get_kms_key_id(app_mode: &AppMode) -> String {
@@ -628,18 +538,10 @@ async fn main() -> Result<(), Error> {
         enclave_key.to_vec()
     };
 
-    let jwt_secret = get_or_create_jwt_secret(
-        &app_mode,
-        aws_credential_manager.clone(),
-        &enclave_key,
-    )
-    .await?;
-
     let app_state = AppStateBuilder::default()
         .app_mode(app_mode.clone())
         .enclave_key(enclave_key)
         .aws_credential_manager(aws_credential_manager)
-        .jwt_secret(jwt_secret)
         .build()
         .await?;
     tracing::info!("App state created, app_mode: {:?}", app_mode);

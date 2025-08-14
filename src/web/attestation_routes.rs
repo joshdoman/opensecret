@@ -3,7 +3,6 @@ use aws_nitro_enclaves_nsm_api::{
     api::{Request, Response},
     driver::{nsm_exit, nsm_init, nsm_process_request},
 };
-use axum::routing::post;
 use axum::{extract::State, routing::get, Json};
 use axum::{http::StatusCode, Router};
 use base64::{engine::general_purpose, Engine as _};
