@@ -71,7 +71,7 @@ struct AttestationResponse {
 pub fn router(app_state: Arc<AppState>) -> Router<()> {
     Router::new()
         .route("/attestation/:nonce", get(get_attestation))
-        .route("/key_exchange", post(key_exchange))
+        // .route("/key_exchange", post(key_exchange))
         .with_state(app_state)
 }
 
@@ -400,61 +400,61 @@ async fn generate_real_attestation(
     }
 }
 
-async fn key_exchange(
-    State(data): State<Arc<AppState>>,
-    Json(payload): Json<KeyExchangeRequest>,
-) -> Result<Json<KeyExchangeResponse>, ApiError> {
-    debug!("Entering key_exchange function");
-    trace!("Starting key exchange");
+// async fn key_exchange(
+//     State(data): State<Arc<AppState>>,
+//     Json(payload): Json<KeyExchangeRequest>,
+// ) -> Result<Json<KeyExchangeResponse>, ApiError> {
+//     debug!("Entering key_exchange function");
+//     trace!("Starting key exchange");
 
-    let client_public_key_bytes = general_purpose::STANDARD
-        .decode(&payload.client_public_key)
-        .map_err(|_| ApiError::BadRequest)?;
+//     let client_public_key_bytes = general_purpose::STANDARD
+//         .decode(&payload.client_public_key)
+//         .map_err(|_| ApiError::BadRequest)?;
 
-    let client_public_key = x25519_dalek::PublicKey::from(
-        <[u8; 32]>::try_from(client_public_key_bytes.as_slice())
-            .map_err(|_| ApiError::BadRequest)?,
-    );
+//     let client_public_key = x25519_dalek::PublicKey::from(
+//         <[u8; 32]>::try_from(client_public_key_bytes.as_slice())
+//             .map_err(|_| ApiError::BadRequest)?,
+//     );
 
-    let ephemeral_secret = data
-        .get_and_remove_ephemeral_secret(&payload.nonce)
-        .await
-        .ok_or(ApiError::BadRequest)?;
+//     let ephemeral_secret = data
+//         .get_and_remove_ephemeral_secret(&payload.nonce)
+//         .await
+//         .ok_or(ApiError::BadRequest)?;
 
-    let shared_secret = ephemeral_secret.diffie_hellman(&client_public_key);
+//     let shared_secret = ephemeral_secret.diffie_hellman(&client_public_key);
 
-    // Generate a random session key using your secure random function
-    let session_key: [u8; 32] = crate::encrypt::generate_random();
+//     // Generate a random session key using your secure random function
+//     let session_key: [u8; 32] = crate::encrypt::generate_random();
 
-    // Encrypt the session key using the shared secret
-    let nonce_bytes: [u8; 12] = crate::encrypt::generate_random();
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let cipher = ChaCha20Poly1305::new(shared_secret.as_bytes().into());
-    let mut encrypted_session_key = nonce_bytes.to_vec();
-    encrypted_session_key.extend_from_slice(
-        &cipher
-            .encrypt(nonce, session_key.as_ref())
-            .map_err(|_| ApiError::InternalServerError)?,
-    );
+//     // Encrypt the session key using the shared secret
+//     let nonce_bytes: [u8; 12] = crate::encrypt::generate_random();
+//     let nonce = Nonce::from_slice(&nonce_bytes);
+//     let cipher = ChaCha20Poly1305::new(shared_secret.as_bytes().into());
+//     let mut encrypted_session_key = nonce_bytes.to_vec();
+//     encrypted_session_key.extend_from_slice(
+//         &cipher
+//             .encrypt(nonce, session_key.as_ref())
+//             .map_err(|_| ApiError::InternalServerError)?,
+//     );
 
-    // Generate a new UUID for the session
-    let session_id = Uuid::new_v4();
+//     // Generate a new UUID for the session
+//     let session_id = Uuid::new_v4();
 
-    trace!(
-        "Generated session key {:?} for nonce {:?}",
-        session_key,
-        nonce
-    );
+//     trace!(
+//         "Generated session key {:?} for nonce {:?}",
+//         session_key,
+//         nonce
+//     );
 
-    // Store the session state
-    data.session_states
-        .write()
-        .await
-        .insert(session_id, SessionState::new(session_key));
+//     // Store the session state
+//     data.session_states
+//         .write()
+//         .await
+//         .insert(session_id, SessionState::new(session_key));
 
-    debug!("Exiting key_exchange function");
-    Ok(Json(KeyExchangeResponse {
-        session_id,
-        encrypted_session_key: general_purpose::STANDARD.encode(&encrypted_session_key),
-    }))
-}
+//     debug!("Exiting key_exchange function");
+//     Ok(Json(KeyExchangeResponse {
+//         session_id,
+//         encrypted_session_key: general_purpose::STANDARD.encode(&encrypted_session_key),
+//     }))
+// }

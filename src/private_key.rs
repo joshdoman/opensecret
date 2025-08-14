@@ -11,7 +11,6 @@ use tracing::{debug, error, info};
 use crate::{
     aws_credentials::AwsCredentialManager,
     encrypt::{decrypt_with_key, generate_random_enclave},
-    web::protected_routes::validate_bip85_path,
     Error,
 };
 
@@ -123,10 +122,10 @@ pub fn decrypt_and_derive_bip85_mnemonic(
     // 1. Validate BIP-85 path format
     debug!("Validating BIP-85 path format");
     // Convert ApiError to our Error type
-    validate_bip85_path(bip85_path).map_err(|_| {
-        error!("BIP-85 path validation failed: {}", bip85_path);
-        Error::InvalidDerivationPath(format!("Invalid BIP-85 path format: {}", bip85_path))
-    })?;
+    // validate_bip85_path(bip85_path).map_err(|_| {
+    //     error!("BIP-85 path validation failed: {}", bip85_path);
+    //     Error::InvalidDerivationPath(format!("Invalid BIP-85 path format: {}", bip85_path))
+    // })?;
 
     // 2. Decrypt user root mnemonic
     debug!("Decrypting user root mnemonic");
