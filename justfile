@@ -152,40 +152,6 @@ build-and-deploy-logging-prod: build-logging-docker save-logging-docker-image-pr
 # Build and deploy logging for preview
 build-and-deploy-logging-preview: build-logging-docker save-logging-docker-image-preview scp-logging-to-aws-preview load-logging-docker-on-aws-preview run-logging-docker-on-aws-preview
 
-### Database Commands ###
-
-# Setup diesel CLI (first-time setup)
-diesel-setup:
-    diesel setup
-
-# Generate a new migration
-diesel-migration-generate name:
-    diesel migration generate {{name}}
-
-# Run migrations locally
-diesel-migration-run-local:
-    diesel migration run
-
-# Run migrations on development
-diesel-migration-run-dev:
-    diesel migration run --database-url $DEV_DATABASE_URL
-
-# Run migrations on production
-diesel-migration-run-prod:
-    diesel migration run --database-url $PROD_DATABASE_URL
-
-# Run migrations on preview
-diesel-migration-run-preview:
-    diesel migration run --database-url $PREVIEW_DATABASE_URL
-
-
-### Continuum Proxy Commands ###
-
-# Update continuum-proxy
-update-continuum-proxy:
-    containerID=$({{container}} create --platform linux/arm64 ghcr.io/edgelesssys/privatemode/privatemode-proxy:v1.21.0@sha256:81b832614df21fe159aeef8e1368e4f26e15d8e05f0aad56f4a0ae7ceaca31e2) && \
-    {{container}} cp "${containerID}":/bin/privatemode-proxy ./continuum-proxy && \
-    {{container}} rm "${containerID}"
 
 ### Enclave Management ###
 
@@ -647,20 +613,3 @@ deploy-preview-nix: build-eif-preview verify-pcr-preview scp-eif-to-aws-preview
 # Clean EIF build artifacts
 clean-eif:
     rm -f result
-
-### Tinfoil Proxy Commands ###
-
-# Build tinfoil-proxy binary using Go
-build-tinfoil-proxy:
-    {{container}} build --platform linux/arm64 -t tinfoil-proxy-builder -f tinfoil-proxy/Dockerfile tinfoil-proxy
-    {{container}} create --name tinfoil-proxy-extract tinfoil-proxy-builder
-    mkdir -p tinfoil-proxy/dist
-    {{container}} cp tinfoil-proxy-extract:/tinfoil-proxy tinfoil-proxy/dist/
-    {{container}} rm tinfoil-proxy-extract
-    echo "Go binary created at: tinfoil-proxy/dist/tinfoil-proxy"
-    echo "Size: $(du -h tinfoil-proxy/dist/tinfoil-proxy | cut -f1)"
-    file tinfoil-proxy/dist/tinfoil-proxy
-
-# Clean tinfoil-proxy build artifacts
-clean-tinfoil-proxy:
-    rm -rf tinfoil-proxy/dist

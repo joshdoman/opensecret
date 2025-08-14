@@ -33,13 +33,10 @@
           pkgs.clang
           pkgs.jq
           pkgs.just
-          pkgs.postgresql
-          pkgs.diesel-cli
           pkgs.python3
           (pkgs.python3.withPackages (ps: with ps; [
             cryptography
           ]))
-          pkgs.go
         ];
         linuxOnlyInputs = [
           pkgs.podman
@@ -56,22 +53,9 @@
           ++ pkgs.lib.optionals pkgs.stdenv.isLinux linuxOnlyInputs
           ++ pkgs.lib.optionals pkgs.stdenv.isDarwin darwinOnlyInputs;
 
-        setupPostgresScript = pkgs.writeShellScript "setup-postgres" ''
-          export PGDATA=$(mktemp -d)
-          export PGSOCKETS=$(mktemp -d)
-          ${pkgs.postgresql}/bin/initdb -D $PGDATA
-          ${pkgs.postgresql}/bin/pg_ctl start -D $PGDATA -o "-h localhost -p 5432 -k $PGSOCKETS"
-          until ${pkgs.postgresql}/bin/pg_isready -h localhost -p 5432; do sleep 1; done
-          ${pkgs.postgresql}/bin/createuser -h localhost -p 5432 -s postgres
-          ${pkgs.postgresql}/bin/psql -h localhost -p 5432 -c "CREATE USER \"opensecret_user\" WITH PASSWORD 'password';" -U postgres
-          ${pkgs.postgresql}/bin/psql -h localhost -p 5432 -c "CREATE DATABASE \"opensecret\" OWNER \"opensecret_user\";" -U postgres
-          exit
-        '';
-
         setupEnvScript = pkgs.writeShellScript "setup-env" ''
           if [ ! -f .env ]; then
             cp .env.sample .env
-            sed -i 's|DATABASE_URL=postgres://localhost/opensecret|DATABASE_URL=postgres://opensecret_user:password@localhost:5432/opensecret|g' .env
 
             # Get a new ENCLAVE_SECRET_MOCK value using openssl
             export enclaveSecret=$(openssl rand -hex 32)
@@ -127,11 +111,9 @@
               # Set up Python environment
               export PYTHONPATH="$(find ${pkgs.python3}/lib -name site-packages):$PYTHONPATH"
 
-              # Copy opensecret and continuum-proxy to their locations
+              # Copy opensecret to its location
               mkdir -p /app
               install -m 755 ${opensecret}/bin/opensecret /app/
-              install -m 755 ${continuum-proxy}/bin/continuum-proxy /app/
-              install -m 755 ${tinfoil-proxy}/bin/tinfoil-proxy /app/
 
               ${builtins.readFile ./entrypoint.sh}
             '')
@@ -153,7 +135,6 @@
             pkgs.bash
             pkgs.busybox
             pkgs.openssl
-            pkgs.postgresql
             pkgs.socat
             pkgs.python3
             pkgs.jq
@@ -162,8 +143,6 @@
             pkgs.cacert
             pkgs.curl
             nitro-bins
-            continuum-proxy
-            tinfoil-proxy
           ];
           pathsToLink = [ "/bin" "/lib" "/app" "/usr/bin" "/usr/sbin" "/sbin" ];
         };
@@ -212,10 +191,7 @@
           buildInputs = [
             pkgs.openssl
             pkgs.zlib
-            pkgs.postgresql
-            pkgs.diesel-cli
           ];
-          LIBPQ_LIB_DIR = "${pkgs.postgresql.lib}/lib";
         };
 
         # Use pre-built NSM library and KMS tools from nitro-bins directory
@@ -231,20 +207,6 @@
             install -m 755 $src/kmstool_enclave_cli $out/bin/
           '';
         };
-
-        # Copy continuum-proxy from local filesystem
-        continuum-proxy = pkgs.runCommand "continuum-proxy" {} ''
-          mkdir -p $out/bin
-          cp ${./continuum-proxy} $out/bin/continuum-proxy
-          chmod +x $out/bin/continuum-proxy
-        '';
-
-        # Copy tinfoil-proxy from local filesystem
-        tinfoil-proxy = pkgs.runCommand "tinfoil-proxy" {} ''
-          mkdir -p $out/bin
-          cp ${./tinfoil-proxy/dist/tinfoil-proxy} $out/bin/tinfoil-proxy
-          chmod +x $out/bin/tinfoil-proxy
-        '';
 
         arch = pkgs.stdenv.hostPlatform.uname.processor;
       in
@@ -292,7 +254,6 @@
               chmod 600 $CONTAINERS_POLICY $CONTAINERS_CONF
             ''}
 
-            ${setupPostgresScript}
             ${setupEnvScript}
           '';
         };
