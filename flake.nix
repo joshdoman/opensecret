@@ -63,10 +63,6 @@
             # Get a new ENCLAVE_SECRET_MOCK value using openssl
             export enclaveSecret=$(openssl rand -hex 32)
             sed -i "s|ENCLAVE_SECRET_MOCK=|ENCLAVE_SECRET_MOCK=$enclaveSecret|g" .env
-
-            # Get a new JWT_SECRET value using openssl
-            export jwtSecret=$(openssl rand -base64 32)
-            sed -i "s|JWT_SECRET=|JWT_SECRET=$jwtSecret|g" .env
           fi
         '';
 
