@@ -29,6 +29,7 @@ fi
 
 log "Starting entrypoint script"
 log "APP_MODE=$APP_MODE"
+log "Kernel version: $(uname -r)"
 
 # Configure loopback interface
 log "Configuring loopback interface"
@@ -42,7 +43,7 @@ vsock_request() {
     local request=$3
 
     response=$(python3 /app/vsock_helper.py "$cid" "$port" "$request")
-    
+
     # Check if the response contains an error
     if echo "$response" | jq -e 'has("error")' > /dev/null; then
         error_message=$(echo "$response" | jq -r '.error')
